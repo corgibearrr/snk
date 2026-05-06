@@ -2014,7 +2014,7 @@ class Boss extends Enemy {
     this.spawnedObstacles = 0;
     
     if (level === 1) { // 백규 - revolver rusher
-      this.hp = 50; this.maxHp = 50;          // 20 → 50
+      this.hp = 50; this.maxHp = 80;          // 20 → 80
       this.name = '백규';
       this.speed = 195;
       this.color = '#ffaa00';
@@ -2067,7 +2067,7 @@ class Boss extends Enemy {
       this.slidingCd = 0;
       this.slidingDir = {x: 0, y: 0};
     } else if (level === 4) { // CP-09
-      this.hp = 120; this.maxHp = 120;        // 50 → 120
+      this.hp = 120; this.maxHp = 420;        // 50 → 120
       this.name = 'CP-09';
       this.speed = 75;
       this.color = '#00aaff';
