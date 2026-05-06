@@ -40,6 +40,12 @@ const STATE = {
   ended: false,
   time: 0,              // accumulated game time (sec)
   realTime: 0,          // ms
+  // Bullet-time (Shift): 적/총알/이펙트만 느려지고 플레이어는 정상속도.
+  // active 면 화면에 시안 톤 + 스캔라인 오버레이 표시.
+  slowMo: false,
+  slowMoFactor: 0.25,   // 적/총알/효과의 시간 배율 (0.25 = 1/4 속도)
+  slowMoIntensity: 0,   // 시각효과 강도 (0~1, 부드럽게 페이드 인/아웃)
+  howtoOpen: false,     // How To Play 모달 열림 여부 (게임 일시정지)
 };
 
 const KEYS = {};
@@ -83,6 +89,14 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (STATE.inShop) closeShop();
     if (STATE.inCheat) closeCheat();
+    // howto 모달도 ESC 로 닫기
+    if (STATE.howtoOpen) {
+      document.getElementById('howtoModal').classList.remove('active');
+      STATE.howtoOpen = false;
+      if (STATE.running && !STATE.inShop && !STATE.inLimitBreak && !STATE.inCheat) {
+        STATE.paused = false;
+      }
+    }
   }
 });
 window.addEventListener('keyup', (e) => {
@@ -523,7 +537,7 @@ class Player {
     this.slashStage3Time = 1.5;
     this.slashCost = [15, 25, 40];
     this.slashRange = [270, 382, 494];     // 기존 [135, 191, 247] × 2 (캐릭터 크기와 동일 비율)
-    this.slashDamage = 12;
+    this.slashDamage = 1;                  // 칼 휘두르기 기본 데미지 (낮음 — 패링이 메인)
     this.slashCooldown = 0;
     this.slashCdMax = 0.3;
     
@@ -562,6 +576,10 @@ class Player {
     }
     this._prevX = this.x;
     this._prevY = this.y;
+    
+    // 슬로우모션은 매 프레임 false 로 리셋 → 아래 이동 분기에서 조건 맞으면 다시 켜짐.
+    // rolling 중이거나 일시정지/게임오버에선 자동으로 꺼짐.
+    STATE.slowMo = false;
     
     if (this.rollCooldown > 0) this.rollCooldown -= dt;
     if (this.fireCooldown > 0) this.fireCooldown -= dt;
@@ -636,25 +654,41 @@ class Player {
       const len = Math.hypot(mx, my);
       if (len > 0) { mx /= len; my /= len; }
       
-      // 쉬프트 = 스프린트 (배터리 지속 소모, 1.7배 속도)
-      // - 실제로 움직이고 있을 때만 (mx/my 가 0이 아닌 경우) 발동
+      // 쉬프트 = 시간 슬로우 (불릿타임)
+      // - 적/총알/효과만 느려지고 플레이어는 정상속도로 움직임
+      // - 배터리 빠르게 소모 (계속 누르고 있으면 금방 바닥)
       // - 배터리가 0 이상일 때만 작동, 0 도달 시 자동 해제
-      const sprintCostPerSec = 18;       // 초당 배터리 18 소모
-      const sprintMult = 2.55;
-      const sprintKey = KEYS['shift'] || KEYS['Shift'] || KEYS['ShiftLeft'] || KEYS['ShiftRight'];
-      const isSprinting = sprintKey && (mx || my) && this.battery > 0;
-      const speedMult = isSprinting ? sprintMult : 1;
+      // - 화면에 사이버펑크 시안 톤 + 캐릭터 잔상 효과
+      const slowMoCostPerSec = 35;       // 초당 배터리 35 소모 (스프린트보다 훨씬 빠름)
+      const slowKey = KEYS['shift'] || KEYS['Shift'] || KEYS['ShiftLeft'] || KEYS['ShiftRight'];
+      const isSlowMo = slowKey && this.battery > 0 && !STATE.paused;
+      STATE.slowMo = isSlowMo;
       
-      this.x += mx * this.speed * speedMult * dt;
-      this.y += my * this.speed * speedMult * dt;
+      this.x += mx * this.speed * dt;
+      this.y += my * this.speed * dt;
       
-      if (isSprinting) {
-        this.battery = Math.max(0, this.battery - sprintCostPerSec * dt);
-        // 스프린트 중엔 배터리 회복 정지 살짝 유지 (스프린트 멈추자마자 회복되는 부자연스러움 방지)
-        this.batteryRegenDelay = Math.max(this.batteryRegenDelay, 0.3);
-        // 잔상 파티클 살짝 (대시처럼 강하지 않고 가볍게)
-        if (Math.random() < 0.25) {
-          particles.push(new Particle(this.x, this.y, rand(-15,15), rand(-15,15), 0.25, '#88ccff', 4));
+      if (isSlowMo) {
+        this.battery = Math.max(0, this.battery - slowMoCostPerSec * dt);
+        // 슬로우모션 종료 직후 회복 잠시 정지
+        this.batteryRegenDelay = Math.max(this.batteryRegenDelay, 0.5);
+        // 잔상 프레임 매우 자주 생성 — 불릿타임 느낌
+        this.trailSpawnTimer -= dt;
+        if (this.trailSpawnTimer <= 0) {
+          this.trailFrames.push({
+            x: this.x, y: this.y,
+            state: this.anim.state,
+            frameIdx: this.anim.frameIdx,
+            flip: this.facingLeft,
+            life: 0.5,
+            life0: 0.5,
+            slowMo: true,    // 슬로우모션 잔상 (시안 강조)
+          });
+          this.trailSpawnTimer = 0.025;  // 매우 자주 (40fps)
+          if (this.trailFrames.length > 16) this.trailFrames.shift();
+        }
+        // 시안 파티클 (사이버펑크)
+        if (Math.random() < 0.3) {
+          particles.push(new Particle(this.x, this.y, rand(-20,20), rand(-20,20), 0.4, '#00ffee', 4));
         }
       }
       
@@ -736,9 +770,15 @@ class Player {
     const ax = Math.cos(this.angle);
     this.facingLeft = ax < 0;
     
-    // 우선순위: slash > shoot > walk > idle
+    // 우선순위: slide(rolling) > slash > shoot > walk > idle
+    // slide 이미지가 없으면 자연스럽게 walk 로 폴백 (draw 단계에서)
     let nextState;
-    if (this.slashAnimTime > 0) nextState = 'slash';
+    if (this.rolling) {
+      const slideImg = ANIM_IMAGES['slide'];
+      const slideOk = slideImg && slideImg.complete && slideImg.naturalWidth > 0;
+      nextState = slideOk ? 'slide' : 'walk';
+    }
+    else if (this.slashAnimTime > 0) nextState = 'slash';
     else if (this.shootAnimTime > 0) nextState = 'shoot';
     else if (this.animState === 'walk') nextState = 'walk';
     else nextState = 'idle';
@@ -932,6 +972,15 @@ class Player {
     // Visual + 지속 히트박스 (잔상이 남는 동안 베기/반사 효과)
     effects.push(new SlashEffect(this.x, this.y, range, stage, damage));
     
+    // 카운터 윈도우: 크랙슨이 돌진/대시 중이고 가까이 있으면, 슬래시 동안 짧은 무적
+    // — 카운터 슬래시가 보스 contact damage 보다 먼저 발동되도록
+    if (bossEntity && !bossEntity.dead && bossEntity.level === 2) {
+      const isCharging = bossEntity.charging || bossEntity.tripleDashState === 'dashing';
+      if (isCharging && dist(this, bossEntity) < range + bossEntity.r + 30) {
+        this.invulnTime = Math.max(this.invulnTime, 0.25);
+      }
+    }
+    
     sfx('slash');
     
     // Gun-Kata: auto-fire 12 shots
@@ -1097,9 +1146,14 @@ class Player {
     }
     
     // Try to draw animated sprite
-    // 현재 상태 결정 (rolling 은 walk 로 취급)
+    // 현재 상태 결정 (rolling 은 slide 우선, 없으면 walk 로 폴백)
     let drawState;
-    if (this.rolling) drawState = 'walk';
+    if (this.rolling) {
+      // slide 이미지가 로드돼 있으면 slide, 아니면 walk
+      const slideImg = ANIM_IMAGES['slide'];
+      const slideOk = slideImg && slideImg.complete && slideImg.naturalWidth > 0;
+      drawState = slideOk ? 'slide' : 'walk';
+    }
     else if (this.slashAnimTime > 0) drawState = 'slash';
     else if (this.shootAnimTime > 0) drawState = 'shoot';
     else if (this.animState === 'walk') drawState = 'walk';
@@ -1118,9 +1172,15 @@ class Player {
       for (const tf of this.trailFrames) {
         const ts = worldToScreen(tf.x, tf.y);
         const a = tf.life / tf.life0;
-        ctx.globalAlpha = a * 0.45;
-        // 시안 톤으로 살짝 물들이기 (대시 색)
-        ctx.filter = 'hue-rotate(160deg) saturate(1.5)';
+        if (tf.slowMo) {
+          // 슬로우모션 잔상 — 강한 시안 글로우
+          ctx.globalAlpha = a * 0.55;
+          ctx.filter = 'hue-rotate(180deg) saturate(2) brightness(1.2)';
+        } else {
+          // 일반 대시 잔상 — 시안 톤
+          ctx.globalAlpha = a * 0.45;
+          ctx.filter = 'hue-rotate(160deg) saturate(1.5)';
+        }
         drawAnimFrame(tf.state, tf.frameIdx, ts.x, ts.y, size, tf.flip);
       }
       ctx.filter = 'none';
@@ -1353,7 +1413,13 @@ class Bullet {
       }
     }
     if (bossEntity && !bossEntity.dead) {
-      if (!this.pierced.includes(bossEntity) && dist(this, bossEntity) < bossEntity.r + this.r) {
+      // 제미네이터는 약점이 본체 앞으로 튀어나와 있어서, 충돌 반경을 약점 끝까지 확장
+      // 그래야 약점에 총알이 도달할 수 있음 (본체에 맞은 건 takeDamage 안에서 BLOCKED 처리)
+      let bossEffR = bossEntity.r;
+      if (bossEntity.level === 5 && bossEntity.weakSpotOffset !== undefined) {
+        bossEffR = bossEntity.weakSpotOffset + bossEntity.weakSpotR;
+      }
+      if (!this.pierced.includes(bossEntity) && dist(this, bossEntity) < bossEffR + this.r) {
         bossEntity.takeDamage(this.damage);
         if (player.hasUpgrade('emp')) bossEntity.slowTimer = 0.5;
         damageNumbers.push(new DmgNumber(bossEntity.x, bossEntity.y - 50, this.damage, '#ffcc00'));
@@ -1977,6 +2043,14 @@ class Boss extends Enemy {
       this.stunFromWall = 0;
       this.shockwaveCd = 4;      // 충격파 발사 쿨다운 (4초마다)
       this.shockwavePrep = 0;    // 충격파 차징 시간 (0.5초)
+      // 3연속 돌진 패턴 (딜레이 없음, 짧은 거리)
+      this.tripleDashCd = 7;     // 첫 발동까지 7초
+      this.tripleDashRemaining = 0;  // 남은 돌진 횟수 (3 → 0)
+      this.tripleDashState = 'idle'; // 'idle' | 'gather' | 'dashing' | 'recover'
+      this.tripleDashTimer = 0;       // 현재 dash/recover 시간
+      this.tripleDashAngle = 0;
+      this.tripleDashGatherTime = 0;  // 기 모으기 진행도 (시각용)
+      this.tripleDashGatherDuration = 0.8;  // 기 모으기 0.8초 (예고)
     } else if (level === 3) { // 리퍼
       this.hp = 1; this.maxHp = 1;
       this.name = '리퍼';
@@ -2007,6 +2081,7 @@ class Boss extends Enemy {
       this.color = '#ff0040';
       this.r = 108;
       this.weakSpotR = 50;
+      this.weakSpotOffset = this.r + 24;  // 본체보다 앞으로 튀어나온 약점 (r + 24)
       this.barrageTimer = 0;
       this.barragePhase = 0;
       this.bombardCd = 0;
@@ -2022,20 +2097,35 @@ class Boss extends Enemy {
     }
   }
   
+  // 제미네이터 약점 월드 좌표 (본체 앞으로 튀어나온 위치)
+  weakSpotPos() {
+    return {
+      x: this.x + Math.cos(this.angle) * this.weakSpotOffset,
+      y: this.y + Math.sin(this.angle) * this.weakSpotOffset,
+    };
+  }
+  
   takeDamage(d) {
     if (this.dead) return;
     // 경계면 밖에 있을 때는 무적 — 단, 리퍼(level 3)는 무한 사거리 사격하므로 패링 반격을 위해 예외
     if (this.level !== 3 && !this.isOnScreen()) return;
     
+    // 리퍼 슬라이딩 중에는 무적 (회피 액션의 보상)
+    if (this.level === 3 && this.slidingTime > 0) {
+      // 슬라이드 중 무적임을 시각적으로 표시
+      damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#ff60ff', 'EVADED'));
+      return;
+    }
+    
     // Geminator: only weak point
-    // 약점은 보스의 정면(this.angle 방향)에 있음 — 플레이어가 약점 방향에 있어야 데미지
-    // 레이저 페이즈에선 angle 이 플레이어를 추적하므로 약점이 자연스럽게 플레이어 방향
+    // 약점은 보스의 정면에 본체보다 앞으로 튀어나와 있음 (weakSpotOffset)
+    // 플레이어가 보스 정면 콘 안에 있어야 약점에 도달 가능 — 그 외엔 본체 장갑
     if (this.level === 5) {
       const playerAngle = angleTo(this, player);
       let diff = playerAngle - this.angle;
       while (diff > Math.PI) diff -= TAU;
       while (diff < -Math.PI) diff += TAU;
-      // 약점 콘 ±35도 안이어야 데미지
+      // 약점 콘 ±35도 안이어야 데미지 (약점이 본체보다 앞으로 튀어나와 있음)
       if (Math.abs(diff) > Math.PI * 0.2) {
         damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#666', 'BLOCKED'));
         return;
@@ -2218,6 +2308,135 @@ class Boss extends Enemy {
         return;
       }
       
+      // 3연속 돌진 패턴 — 짧은 거리, 빠른 연속 발동 (단, 첫 돌진 전 기 모으기)
+      if (this.tripleDashCd > 0) this.tripleDashCd -= dt;
+      
+      // 트리플 대시 진행 중
+      if (this.tripleDashRemaining > 0 || this.tripleDashState !== 'idle') {
+        if (this.tripleDashState === 'gather') {
+          // 기 모으기 단계 — 정지 상태로 0.8초 차징, 보스 주변에 빨간 기 파티클
+          this.tripleDashGatherTime -= dt;
+          // 진행도 0~1
+          const gT = 1 - this.tripleDashGatherTime / this.tripleDashGatherDuration;
+          // 보스 주변에 빨간 기 파티클이 안쪽으로 빨려들어감 (수렴 효과)
+          if (Math.random() < 0.55) {
+            const a = Math.random() * TAU;
+            const startR = this.r + 80 + Math.random() * 100;   // 멀리서 시작
+            const endR = this.r + 8;                            // 보스 근처로 수렴
+            // 시작 위치
+            const sx = this.x + Math.cos(a) * startR;
+            const sy = this.y + Math.sin(a) * startR;
+            // 보스 쪽으로 향하는 속도
+            const inwardSpeed = 280 + 200 * gT;
+            const inwardX = -Math.cos(a) * inwardSpeed;
+            const inwardY = -Math.sin(a) * inwardSpeed;
+            // 색깔: 진행 따라 빨강 → 흰색
+            const color = gT > 0.7 ? '#ffffff' : (gT > 0.4 ? '#ff8888' : '#ff4040');
+            particles.push(new Particle(sx, sy, inwardX, inwardY, rand(0.3, 0.5), color, 5 + gT * 4));
+          }
+          // 발끝/지면 충격파 느낌으로 가끔 빨간 링 파티클
+          if (Math.random() < 0.15 && gT > 0.3) {
+            const a = Math.random() * TAU;
+            const rr = this.r + rand(20, 50);
+            particles.push(new Particle(
+              this.x + Math.cos(a) * rr,
+              this.y + Math.sin(a) * rr,
+              0, -rand(40, 80),
+              0.4, '#ff4040', 4
+            ));
+          }
+          // 시점 미세 떨림 (가까운 거리일 때만 의미가 있음)
+          if (gT > 0.6 && d < 700) {
+            STATE.shake = Math.max(STATE.shake, 4 * gT);
+          }
+          // 기 모으기 끝 → 첫 돌진 시작
+          if (this.tripleDashGatherTime <= 0) {
+            this.tripleDashAngle = targetAngle;
+            this.tripleDashTimer = 0.3;   // 짧은 돌진 시간 (속도 20% 감소했으므로 시간 살짝 늘려 비슷한 거리)
+            this.tripleDashState = 'dashing';
+            // 발동 사운드
+            sfx('charge');
+            STATE.shake = Math.max(STATE.shake, 14);
+          }
+        } else if (this.tripleDashState === 'dashing') {
+          // 짧고 빠른 돌진 (속도 20% 감소: 1700 → 1360)
+          this.tripleDashTimer -= dt;
+          const dashSpeed = 1360;
+          this.x += Math.cos(this.tripleDashAngle) * dashSpeed * dt;
+          this.y += Math.sin(this.tripleDashAngle) * dashSpeed * dt;
+          
+          // 강화된 잔상 — 캐릭터 잔상 + 파티클 트레일
+          // 1) 매우 자주 잔상 파티클 (진로를 따라 길게 늘어짐)
+          for (let i = 0; i < 3; i++) {
+            const a = Math.random() * TAU;
+            particles.push(new Particle(
+              this.x, this.y,
+              Math.cos(a) * rand(20, 80) - Math.cos(this.tripleDashAngle) * 200,
+              Math.sin(a) * rand(20, 80) - Math.sin(this.tripleDashAngle) * 200,
+              rand(0.25, 0.45),
+              i === 0 ? '#ff8080' : (i === 1 ? '#ff4040' : '#ffffff'),
+              rand(4, 7)
+            ));
+          }
+          // 2) 보스 본체 위치에 잔상 'echo' 효과 — 진로 뒤쪽으로 페이드되는 빨간 큰 파티클
+          if (Math.random() < 0.85) {
+            // 뒤쪽으로 살짝 이동한 위치에 큰 페이드 파티클
+            const trailDist = 30 + Math.random() * 20;
+            particles.push(new Particle(
+              this.x - Math.cos(this.tripleDashAngle) * trailDist,
+              this.y - Math.sin(this.tripleDashAngle) * trailDist,
+              -Math.cos(this.tripleDashAngle) * 40, -Math.sin(this.tripleDashAngle) * 40,
+              0.35, '#ff3030', 14   // 큰 사이즈로 본체 잔상 흉내
+            ));
+          }
+          
+          // 벽/장애물 충돌
+          let hit = false;
+          if (this.x < this.r || this.x > WORLD.w - this.r || this.y < this.r || this.y > WORLD.h - this.r) hit = true;
+          for (const ob of obstacles) {
+            if (ob.dead) continue;
+            if (this.x > ob.x - ob.w/2 - this.r && this.x < ob.x + ob.w/2 + this.r &&
+                this.y > ob.y - ob.h/2 - this.r && this.y < ob.y + ob.h/2 + this.r) {
+              hit = true;
+              ob.takeDamage(40);
+              break;
+            }
+          }
+          // 플레이어 데미지
+          if (!player.rolling && dist(this, player) < this.r + player.r) {
+            player.takeDamage();
+          }
+          
+          if (hit || this.tripleDashTimer <= 0) {
+            this.tripleDashRemaining--;
+            if (this.tripleDashRemaining > 0) {
+              // 곧바로 다음 돌진 — 짧은 recover (0.1초) 후 즉시 시작
+              this.tripleDashState = 'recover';
+              this.tripleDashTimer = 0.1;
+            } else {
+              // 모든 돌진 종료
+              this.tripleDashState = 'idle';
+              this.tripleDashCd = rand(7, 10);  // 다음 트리플 대시까지 7~10초
+            }
+          }
+        } else if (this.tripleDashState === 'recover') {
+          // 짧은 recover — 거의 딜레이 없음
+          this.tripleDashTimer -= dt;
+          // 방향 재조준
+          this.angle = targetAngle;
+          if (this.tripleDashTimer <= 0) {
+            this.tripleDashAngle = targetAngle;
+            this.tripleDashTimer = 0.3;  // 속도 20% 감소했으므로 시간 살짝 늘림
+            this.tripleDashState = 'dashing';
+          }
+        }
+        // 트리플 대시 중엔 다른 행동 X
+        this.x = clamp(this.x, this.r, WORLD.w - this.r);
+        this.y = clamp(this.y, this.r, WORLD.h - this.r);
+        this.facingLeft = Math.cos(this.angle) < 0;
+        return;
+      }
+      
       if (this.chargingPrep > 0) {
         // 돌격 준비: 정지 상태로 1초 카운트다운, 궤도 표시
         this.chargingPrep -= dt;
@@ -2260,10 +2479,14 @@ class Boss extends Enemy {
           this.stunFromWall = 0.8;
         }
       } else {
-        this.angle = targetAngle;
+        // 충격파 차징/활성 중에는 angle 고정 (방향 안 바꿈, 그 자리에서 발산)
+        const inShockwave = (this.shockwavePrep > 0 || this.shockwaveActive > 0);
+        if (!inShockwave) {
+          this.angle = targetAngle;
+        }
         if (this.shockwaveCd > 0) this.shockwaveCd -= dt;
         
-        // 충격파 차징 중: 정지 + 시각 예고
+        // 충격파 차징 중: 정지 + 시각 예고 + 방향 회전 X
         if (this.shockwavePrep > 0) {
           this.shockwavePrep -= dt;
           // 매 프레임 자기 주변에 빨간 파티클 (차징 표시)
@@ -2288,6 +2511,7 @@ class Boss extends Enemy {
           }
         } else if (this.shockwaveActive > 0) {
           // 링 확장 중 — 0.6초 동안 0 → shockwaveRange 까지 확장
+          // 이 동안에도 방향 안 바꾸고 정지
           this.shockwaveActive += dt;
           const t = this.shockwaveActive / 0.6;
           const radiusNow = t * this.shockwaveRange;
@@ -2322,7 +2546,19 @@ class Boss extends Enemy {
           this.x += Math.cos(targetAngle) * this.speed * dt;
           this.y += Math.sin(targetAngle) * this.speed * dt;
           
-          if (this.cooldown <= 0 && d < 675 && this.isOnScreen()) {
+          // 트리플 대시 트리거 (가까운 거리)
+          if (this.tripleDashCd <= 0 && d < 600 && d > 100 && this.isOnScreen()) {
+            this.tripleDashRemaining = 3;
+            this.tripleDashState = 'gather';                       // 기 모으기 단계로 진입
+            this.tripleDashGatherTime = this.tripleDashGatherDuration;
+            this.tripleDashAngle = targetAngle;
+            // 시작 효과
+            for (let i = 0; i < 14; i++) {
+              const a = Math.random() * TAU;
+              particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(80, 200), Math.sin(a) * rand(80, 200), 0.4, '#ff6060', 5));
+            }
+            sfx('charge');
+          } else if (this.cooldown <= 0 && d < 675 && this.isOnScreen()) {
             // 돌격 준비 시작 — 1초 정지 후 발사
             this.chargingPrep = 1.0;
             this.chargeAngle = targetAngle;
@@ -2339,14 +2575,15 @@ class Boss extends Enemy {
       if (this.slidingCd > 0) this.slidingCd -= dt;
       
       // 슬라이딩 회피 (플레이어처럼) — 슬라이드 중이면 이동만
+      // 슬라이드 중에는 무적 (takeDamage에서 체크)
       if (this.slidingTime > 0) {
         this.slidingTime -= dt;
         const slideSpeed = 700;
         this.x += this.slidingDir.x * slideSpeed * dt;
         this.y += this.slidingDir.y * slideSpeed * dt;
-        // 잔상 파티클
-        if (Math.random() < 0.7) {
-          particles.push(new Particle(this.x, this.y, rand(-30, 30), rand(-30, 30), 0.4, '#a020f0', 6));
+        // 잔상 파티클 — 보라색 강조 (슬라이딩 중 무적임을 시각적으로)
+        if (Math.random() < 0.8) {
+          particles.push(new Particle(this.x, this.y, rand(-30, 30), rand(-30, 30), 0.4, '#ff60ff', 6));
         }
         // 슬라이드 중엔 다른 행동 X
         // Clamp 후 종료
@@ -2356,22 +2593,40 @@ class Boss extends Enemy {
         return;
       }
       
-      // 슬라이딩 회피 트리거: 플레이어가 가까이 오거나, 정면으로 총알이 날아오면
+      // 슬라이딩 회피 트리거: 플레이어 산탄총알 또는 패링된(튕긴) 총알이 정면으로 날아오면
+      // 단, 마지막 슬라이딩 후 3초 쿨다운
       if (this.slidingCd <= 0) {
         let shouldSlide = false;
         let slideAngle = 0;
-        // 플레이어가 너무 가깝다 → 옆으로 슬라이드
-        if (d < 250) {
-          shouldSlide = true;
-          // 플레이어 진행 방향에 수직으로 회피
-          slideAngle = targetAngle + (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2);
-        } else {
-          // 정면 근처로 빠른 총알이 오면 슬라이드
+        let bulletThreat = null;
+        
+        // 1순위: 패링되어 튕겨오는 총알 (fromPlayer=true) — 매우 빠르고 데미지 큼
+        for (const eb of enemyBullets) {
+          if (eb.dead) continue;
+          if (!eb.fromPlayer) continue;
+          const bd = dist(this, eb);
+          if (bd > 350) continue;   // 350px 안의 위협만 감지
+          // 이쪽으로 향하는지
+          const ba = Math.atan2(eb.dy, eb.dx);
+          const toMe = angleTo(eb, this);
+          let diff = toMe - ba;
+          while (diff > Math.PI) diff -= TAU;
+          while (diff < -Math.PI) diff += TAU;
+          if (Math.abs(diff) < 0.5) {
+            shouldSlide = true;
+            bulletThreat = eb;
+            // 총알 진행 방향에 수직으로 회피
+            slideAngle = ba + (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2);
+            break;
+          }
+        }
+        
+        // 2순위: 플레이어 샷건 총알 (산탄) — 가까이 + 정면
+        if (!shouldSlide) {
           for (const b of bullets) {
             if (b.dead) continue;
             const bd = dist(this, b);
-            if (bd > 200) continue;
-            // 총알이 이쪽으로 향하는지
+            if (bd > 280) continue;
             const ba = Math.atan2(b.dy, b.dx);
             const toMe = angleTo(b, this);
             let diff = toMe - ba;
@@ -2379,22 +2634,30 @@ class Boss extends Enemy {
             while (diff < -Math.PI) diff += TAU;
             if (Math.abs(diff) < 0.4) {
               shouldSlide = true;
+              bulletThreat = b;
               slideAngle = ba + (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2);
               break;
             }
           }
         }
+        
         if (shouldSlide) {
-          this.slidingTime = 0.3;
-          this.slidingCd = 1.8;  // 다음 슬라이드까지 쿨다운
+          this.slidingTime = 0.4;
+          this.slidingCd = 5.0;  // 5초 쿨다운 (사용자 요청)
           this.slidingDir = { x: Math.cos(slideAngle), y: Math.sin(slideAngle) };
-          // 슬라이드 시작 효과
+          // 슬라이드 시작 효과 — 화이트 플래시 (회피했다는 시각 피드백)
+          for (let i = 0; i < 16; i++) {
+            const a = Math.random() * TAU;
+            particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(80, 220), Math.sin(a) * rand(80, 220), 0.5, '#ffffff', 6));
+          }
           for (let i = 0; i < 12; i++) {
             const a = Math.random() * TAU;
             particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(60, 180), Math.sin(a) * rand(60, 180), 0.4, '#a020f0', 5));
           }
           // 조준 중이면 취소
           if (this.aiming > 0) { this.aiming = 0; this.aimLine = null; }
+          sfx('slash');
+          return;  // 슬라이딩 시작 즉시 다른 행동 X
         }
       }
       
@@ -2442,6 +2705,10 @@ class Boss extends Enemy {
       this.angle = targetAngle;
       this.spawnTimer -= dt;
       this.bombardCd -= dt;
+      // CP-09 사격 쿨다운 (연사용) — 생성자에서 안 만들어진 경우 초기화
+      if (this.cp09FireCd === undefined) this.cp09FireCd = 0;
+      if (this.cp09Bombarding === undefined) this.cp09Bombarding = false;   // 포격 중 플래그
+      this.cp09FireCd -= dt;
       
       // drift
       this.x += Math.cos(this.phaseTimer * 0.5) * this.speed * dt;
@@ -2466,6 +2733,10 @@ class Boss extends Enemy {
       // Bombardment — 더 자주 + 한 번에 5~7개 (화면 안에 있을 때만)
       if (this.bombardCd <= 0 && this.isOnScreen()) {
         const numBombs = 5 + Math.floor(Math.random() * 3);  // 5~7개
+        // 포격 시작 — 포격 시작 시각부터 마지막 폭탄 떨어지는 시각까지 사격 중단
+        this.cp09Bombarding = true;
+        const totalDelay = (numBombs - 1) * 0.15 + 2.5;   // 마지막 setTimeout(0.15*i s) + warningTime(2.5s)
+        // 총 약 3초 정도 사격 중단
         for (let i = 0; i < numBombs; i++) {
           // 첫 번째는 항상 플레이어 위치
           let tx, ty;
@@ -2486,22 +2757,37 @@ class Boss extends Enemy {
             effects.push(new Bombardment(tx, ty, 180, 2.5));
           }, delay * 1000);
         }
-        this.bombardCd = 2.2;  // 4 → 2.2 (훨씬 자주)
+        this.bombardCd = 4.0;  // 다음 포격까지 4초 (사격 페이즈 확보)
+        // 포격 종료 타이머 (마지막 폭탄이 떨어진 후 해제)
+        setTimeout(() => {
+          if (!this.dead) this.cp09Bombarding = false;
+        }, totalDelay * 1000);
+      }
+      
+      // 평시 연사 — 포격 중이 아니고, 화면 안일 때
+      // 4발씩 짧은 연사 (점사 느낌) → 잠깐 쿨다운 → 반복
+      if (!this.cp09Bombarding && this.cp09FireCd <= 0 && this.isOnScreen() && d < 1300) {
+        // 점사 4발 (50ms 간격)
+        const burstCount = 4;
+        for (let i = 0; i < burstCount; i++) {
+          setTimeout(() => {
+            if (this.dead || this.cp09Bombarding) return;
+            const a = angleTo(this, player) + (Math.random() - 0.5) * 0.08;  // 살짝 산탄
+            const sp = 1100;
+            enemyBullets.push(new EnemyBullet(this.x, this.y, Math.cos(a) * sp, Math.sin(a) * sp, {color: '#00aaff', r: 9}));
+          }, i * 50);
+        }
+        // 점사 후 쿨다운 — 적당한 압박감
+        this.cp09FireCd = 0.45;
       }
     } else if (this.level === 5) { // 제미네이터
       // 페이즈별 angle 처리:
-      // - 레이저 페이즈: 약점(후면)이 플레이어를 향하도록 → this.angle = 플레이어 반대 방향
+      // - 레이저 페이즈: 차징 시작 시 잠긴 각도를 그대로 유지 (플레이어 추적 X)
+      //   → 플레이어가 피할 수 있게 1초 딜레이를 주는 핵심 로직
+      // - 발사 단계: 시계방향 회전 (아래 laser 페이즈 내부에서 처리)
       // - 그 외: 천천히 플레이어 추적
       if (this.geminatorPhase === 'laser') {
-        // 약점이 플레이어를 향함 = this.angle 이 플레이어 '반대' 방향
-        const desiredAngle = targetAngle + Math.PI;   // 플레이어 반대
-        let diff = desiredAngle - this.angle;
-        while (diff > Math.PI) diff -= TAU;
-        while (diff < -Math.PI) diff += TAU;
-        // 차징 중엔 빠르게 회전, 발사 중엔 회전 없음
-        if (!this.laserActive) {
-          this.angle += clamp(diff, -3.0 * dt, 3.0 * dt);
-        }
+        // 차징/발사 모두 윗부분에서는 회전하지 않음 — 아래 laser 분기에서 일괄 처리
       } else if (this.geminatorPhase === 'cooling') {
         // 냉각 중 — angle 유지 (약점이 그대로 보이게)
       } else {
@@ -2573,21 +2859,25 @@ class Boss extends Enemy {
       }
       // ─────────── 페이즈 3: 레이저 (LASER) — 차징 1s + 발사 6s ───────────
       else if (this.geminatorPhase === 'laser') {
-        // 약점은 보스 정면(angle 방향, this.r * 0.7 거리)에 있음 — 약점이 곧 무기 부위
-        const wsX = this.x + Math.cos(this.angle) * (this.r * 0.7);
-        const wsY = this.y + Math.sin(this.angle) * (this.r * 0.7);
+        // 약점은 보스 정면(angle 방향, weakSpotOffset 거리)에 있음 — 약점이 곧 무기 부위
+        const wsX = this.x + Math.cos(this.angle) * this.weakSpotOffset;
+        const wsY = this.y + Math.sin(this.angle) * this.weakSpotOffset;
         
         if (!this.laserActive && this.laserFireTime === 0) {
-          // 차징 단계 — 1초 동안 보스가 플레이어를 추적 (약점도 함께 회전)
+          // 차징 단계 — 1초 동안 angle/laserAngle 모두 고정 (플레이어 추적 X)
+          // → 플레이어가 회피 시간을 가질 수 있음
+          // 진입 시점에 한 번만 plyr 방향으로 angle/laserAngle 결정 후 잠금
+          if (this.laserChargeTime === 0) {
+            // 차징 시작: 현재 플레이어 방향을 잠금
+            const tgtA = angleTo(this, player);
+            this.angle = tgtA;
+            // 잠긴 약점 위치에서 잠긴 플레이어 방향으로 레이저 발사
+            const lockedWsX = this.x + Math.cos(this.angle) * this.weakSpotOffset;
+            const lockedWsY = this.y + Math.sin(this.angle) * this.weakSpotOffset;
+            this.laserAngle = Math.atan2(player.y - lockedWsY, player.x - lockedWsX);
+          }
           this.laserChargeTime += dt;
-          // angle 자체를 플레이어 방향으로 회전 (천천히 — 정밀하게)
-          const tgtA = angleTo(this, player);
-          let aDiff = tgtA - this.angle;
-          while (aDiff > Math.PI) aDiff -= TAU;
-          while (aDiff < -Math.PI) aDiff += TAU;
-          this.angle += clamp(aDiff, -3 * dt, 3 * dt);
-          // 레이저 방향은 약점 → 플레이어
-          this.laserAngle = Math.atan2(player.y - wsY, player.x - wsX);
+          // 차징 동안 angle/laserAngle 절대 갱신하지 않음 — 플레이어가 옆으로 빠질 수 있음
           if (this.laserChargeTime >= 1.0) {
             this.laserActive = true;
             this.laserFireTime = 0;
@@ -2664,10 +2954,10 @@ class Boss extends Enemy {
       // ─────────── 페이즈 4: 냉각 (COOLING) — 3초, 약점 완전 노출 ───────────
       else if (this.geminatorPhase === 'cooling') {
         this.coolingTime -= dt;
-        // 약점에서 김(증기) 파티클 — 앞면 위치
+        // 약점에서 김(증기) 파티클 — 본체 앞으로 튀어나온 위치
         if (Math.random() < 0.5) {
-          const wsX = this.x + Math.cos(this.angle) * (this.r * 0.7);
-          const wsY = this.y + Math.sin(this.angle) * (this.r * 0.7);
+          const wsX = this.x + Math.cos(this.angle) * this.weakSpotOffset;
+          const wsY = this.y + Math.sin(this.angle) * this.weakSpotOffset;
           particles.push(new Particle(
             wsX + rand(-30, 30), wsY + rand(-30, 30),
             rand(-20, 20), rand(-100, -40),
@@ -2717,21 +3007,61 @@ class Boss extends Enemy {
     ctx.translate(s.x, s.y);
     
     if (this.aimLine) {
-      ctx.save();
-      ctx.strokeStyle = `rgba(255, 0, 255, ${0.5 + 0.5 * (1 - this.aiming/1.5)})`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(Math.cos(this.aimLine.angle - this.angle) * this.aimLine.length, 0);
-      ctx.restore();
-      ctx.save();
-      ctx.strokeStyle = `rgba(255, 0, 255, ${0.5 + 0.5 * (1 - this.aiming/1.5)})`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(Math.cos(this.aimLine.angle) * this.aimLine.length, Math.sin(this.aimLine.angle) * this.aimLine.length);
-      ctx.stroke();
-      ctx.restore();
+      // 리퍼(level 3): 차징 진행에 따라 라인이 점점 선명해짐
+      // - 차징 시작 (t=0): 매우 흐림 (alpha 0.1)
+      // - 차징 끝 (t=1): 매우 선명 (alpha 1.0) → 발사 (aimLine 사라짐과 동시에 총알)
+      if (this.level === 3) {
+        const t = clamp(1 - this.aiming / 1.2, 0, 1);   // 0(시작) → 1(끝)
+        // 비선형 — 끝에 가까워질수록 급격히 선명해짐 (예측 가능)
+        const sharpness = Math.pow(t, 1.6);
+        const alpha = 0.08 + 0.92 * sharpness;
+        const lineW = 1 + 5 * sharpness;
+        const blur = 4 + 30 * sharpness;
+        
+        ctx.save();
+        // 외곽 글로우 (점점 진해짐)
+        ctx.strokeStyle = `rgba(255, 0, 200, ${alpha * 0.6})`;
+        ctx.lineWidth = lineW + 6;
+        ctx.shadowBlur = blur;
+        ctx.shadowColor = '#ff00ff';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(this.aimLine.angle) * this.aimLine.length, Math.sin(this.aimLine.angle) * this.aimLine.length);
+        ctx.stroke();
+        
+        // 메인 라인 (선명도)
+        ctx.strokeStyle = `rgba(255, 100, 255, ${alpha})`;
+        ctx.lineWidth = lineW;
+        ctx.shadowBlur = blur * 0.7;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(this.aimLine.angle) * this.aimLine.length, Math.sin(this.aimLine.angle) * this.aimLine.length);
+        ctx.stroke();
+        
+        // 발사 직전 (t > 0.85) — 화이트 코어 추가 (마지막 경고)
+        if (t > 0.85) {
+          const finalT = (t - 0.85) / 0.15;
+          ctx.strokeStyle = `rgba(255, 255, 255, ${finalT})`;
+          ctx.lineWidth = 2;
+          ctx.shadowBlur = 25;
+          ctx.shadowColor = '#ffffff';
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(Math.cos(this.aimLine.angle) * this.aimLine.length, Math.sin(this.aimLine.angle) * this.aimLine.length);
+          ctx.stroke();
+        }
+        ctx.restore();
+      } else {
+        // 그 외 보스(미사용 — 보스에 aimLine 안 씀): 기존 단순 표시
+        ctx.save();
+        ctx.strokeStyle = `rgba(255, 0, 255, ${0.5 + 0.5 * (1 - this.aiming/1.5)})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(this.aimLine.angle) * this.aimLine.length, Math.sin(this.aimLine.angle) * this.aimLine.length);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
     
     // 크랙슨: 돌격 준비 중일 때 빨간 궤도 라인 (회전 적용 전, 보스 중심 기준)
@@ -2809,14 +3139,137 @@ class Boss extends Enemy {
       ctx.restore();
     }
     
+    // 크랙슨: 트리플 대시 'gather' (기 모으기) 시각화 — 보스 주변에 수렴하는 빨간 링
+    if (this.level === 2 && this.tripleDashState === 'gather') {
+      const gT = 1 - this.tripleDashGatherTime / this.tripleDashGatherDuration;   // 0..1
+      ctx.save();
+      
+      // 외곽 수렴 링: 멀리서 시작해 보스 쪽으로 수렴 (애니메이션)
+      // 진행될수록 링이 보스 쪽으로 작아짐
+      const outerRadiusStart = this.r + 180;
+      const outerRadiusEnd = this.r + 30;
+      const outerR = lerp(outerRadiusStart, outerRadiusEnd, gT);
+      ctx.strokeStyle = `rgba(255, 50, 50, ${0.3 + 0.5 * gT})`;
+      ctx.lineWidth = 3 + 4 * gT;
+      ctx.shadowBlur = 25;
+      ctx.shadowColor = '#ff2020';
+      ctx.setLineDash([14, 8]);
+      ctx.lineDashOffset = -STATE.realTime * 0.06;   // 회전하는 패턴
+      ctx.beginPath();
+      ctx.arc(0, 0, outerR, 0, TAU);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      
+      // 보스 본체 주변 강한 빨간 오라 (점점 진해짐)
+      ctx.fillStyle = `rgba(255, 0, 0, ${0.08 + 0.22 * gT})`;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r + 20 + 10 * Math.sin(STATE.realTime * 0.015), 0, TAU);
+      ctx.fill();
+      
+      // 보스 안쪽 빨간 코어 글로우
+      ctx.shadowBlur = 30;
+      ctx.shadowColor = '#ff0000';
+      ctx.fillStyle = `rgba(255, 80, 80, ${0.15 + 0.35 * gT})`;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r * 0.9, 0, TAU);
+      ctx.fill();
+      
+      // 진행도 호 (보스 위에 게이지 — 발동 임박 알림)
+      ctx.strokeStyle = '#ff4040';
+      ctx.lineWidth = 5;
+      ctx.shadowBlur = 18;
+      ctx.shadowColor = '#ff4040';
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r + 16, -Math.PI / 2, -Math.PI / 2 + TAU * gT);
+      ctx.stroke();
+      
+      // 끝나기 직전(>0.85) 강한 화이트 깜빡임 — 임박 표시
+      if (gT > 0.85) {
+        const finalT = (gT - 0.85) / 0.15;
+        const blink = Math.sin(STATE.realTime * 0.06) > 0 ? 1 : 0.4;
+        ctx.strokeStyle = `rgba(255, 255, 255, ${finalT * blink})`;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(0, 0, this.r + 5, 0, TAU);
+        ctx.stroke();
+      }
+      
+      // 돌진 방향 화살표 — 진행 따라 점점 선명해짐
+      if (gT > 0.4) {
+        const arrowAlpha = (gT - 0.4) / 0.6;
+        const arrowAng = this.tripleDashAngle;   // 첫 돌진 방향 (gather 시작 시 잠금)
+        const arrowLen = 90 + 40 * arrowAlpha;
+        ctx.strokeStyle = `rgba(255, 80, 80, ${arrowAlpha})`;
+        ctx.lineWidth = 5;
+        ctx.shadowBlur = 18;
+        ctx.shadowColor = '#ff2020';
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(arrowAng) * (this.r + 10), Math.sin(arrowAng) * (this.r + 10));
+        ctx.lineTo(Math.cos(arrowAng) * (this.r + 10 + arrowLen), Math.sin(arrowAng) * (this.r + 10 + arrowLen));
+        ctx.stroke();
+        // 화살촉
+        const tipX = Math.cos(arrowAng) * (this.r + 10 + arrowLen);
+        const tipY = Math.sin(arrowAng) * (this.r + 10 + arrowLen);
+        const headSize = 18;
+        // tip 에서 뒤쪽 방향으로 headSize 만큼 떨어진 좌표
+        const baseX = tipX - Math.cos(arrowAng) * headSize;
+        const baseY = tipY - Math.sin(arrowAng) * headSize;
+        // 진행 방향에 perpendicular 방향
+        const perpX = -Math.sin(arrowAng);
+        const perpY = Math.cos(arrowAng);
+        const half = headSize * 0.55;
+        ctx.fillStyle = `rgba(255, 80, 80, ${arrowAlpha})`;
+        ctx.beginPath();
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(baseX + perpX * half, baseY + perpY * half);
+        ctx.lineTo(baseX - perpX * half, baseY - perpY * half);
+        ctx.closePath();
+        ctx.fill();
+      }
+      
+      ctx.restore();
+    }
+    
+    // 크랙슨: 트리플 대시 'dashing' 캐릭터 잔상 효과
+    // (보스 본체 그리기 직전에 보스의 이전 위치들을 페이드된 빨간 그림자로)
+    if (this.level === 2 && this.tripleDashState === 'dashing') {
+      ctx.save();
+      // 진행 방향 반대로 잔상 그림자 3~4겹
+      for (let i = 1; i <= 4; i++) {
+        const offset = i * 22;
+        const ox = -Math.cos(this.tripleDashAngle) * offset;
+        const oy = -Math.sin(this.tripleDashAngle) * offset;
+        const a = (1 - i / 5) * 0.45;
+        ctx.globalAlpha = a;
+        ctx.fillStyle = '#ff3030';
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = '#ff0000';
+        ctx.beginPath();
+        ctx.arc(ox, oy, this.r * (1 - i * 0.05), 0, TAU);
+        ctx.fill();
+      }
+      // 외곽 모션 블러 라인 (속도감)
+      ctx.globalAlpha = 0.55;
+      ctx.strokeStyle = '#ff8080';
+      ctx.lineWidth = 6;
+      ctx.shadowBlur = 25;
+      ctx.shadowColor = '#ff4040';
+      const trailLen = 140;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-Math.cos(this.tripleDashAngle) * trailLen, -Math.sin(this.tripleDashAngle) * trailLen);
+      ctx.stroke();
+      ctx.restore();
+    }
+    
     // 제미네이터 레이저 차징/발사 시각화 (회전 적용 전, 보스 중심 기준)
     if (this.level === 5 && this.geminatorPhase === 'laser') {
       ctx.save();
       const lineLen = 9000;
       
-      // 약점 오프셋 (보스 중심에서 앞면 r*0.7 거리)
-      const wsLocalX = Math.cos(this.angle) * (this.r * 0.7);
-      const wsLocalY = Math.sin(this.angle) * (this.r * 0.7);
+      // 약점 오프셋 (보스 중심에서 앞면 weakSpotOffset 거리)
+      const wsLocalX = Math.cos(this.angle) * this.weakSpotOffset;
+      const wsLocalY = Math.sin(this.angle) * this.weakSpotOffset;
       
       if (!this.laserActive) {
         // 차징 중 — 가는 빨간 라인 (예고)
@@ -2888,25 +3341,53 @@ class Boss extends Enemy {
     const bossKey = bossKeys[this.level];
     if (bossKey && drawEntityImage(bossKey, 0, 0, 0, this.facingLeft)) {
       ctx.restore();
-      // 제미네이터는 약점도 그려야 함 (약점은 보스 뒤쪽 — angle 기반 위치 유지)
+      // 제미네이터는 약점도 그려야 함 (약점은 본체보다 앞으로 튀어나온 위치)
       if (this.level === 5) {
         ctx.save();
         ctx.translate(s.x, s.y);
         ctx.rotate(this.angle);
-        // weak spot at FRONT (앞면) — 플레이어 방향
+        // 약점 위치: 본체보다 앞으로 튀어나옴 (weakSpotOffset)
+        // 약점을 본체에 연결하는 짧은 메탈릭 받침 (시각적 연결감)
+        ctx.fillStyle = '#222';
+        ctx.strokeStyle = '#444';
+        ctx.lineWidth = 3;
+        const stalkW = this.weakSpotR * 0.5;
+        ctx.fillRect(this.r - 4, -stalkW / 2, this.weakSpotOffset - this.r + 4, stalkW);
+        ctx.strokeRect(this.r - 4, -stalkW / 2, this.weakSpotOffset - this.r + 4, stalkW);
+        
+        // 약점 본체 — 둥근 빨간 코어
         ctx.fillStyle = '#ff0000';
-        ctx.shadowBlur = 25;
+        ctx.shadowBlur = 30;
         ctx.shadowColor = '#ff0000';
         ctx.beginPath();
-        ctx.arc(this.r * 0.7, 0, this.weakSpotR, 0, TAU);
+        ctx.arc(this.weakSpotOffset, 0, this.weakSpotR, 0, TAU);
         ctx.fill();
-        // 약점 외곽 빛 펄스 (시인성 ↑)
-        ctx.strokeStyle = '#ffaaaa';
+        // 약점 안쪽 화이트 코어 (시인성 ↑)
+        ctx.fillStyle = '#ffaaaa';
+        ctx.shadowBlur = 15;
+        ctx.beginPath();
+        ctx.arc(this.weakSpotOffset, 0, this.weakSpotR * 0.45, 0, TAU);
+        ctx.fill();
+        // 약점 외곽 빛 펄스
+        ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 4;
+        ctx.shadowBlur = 25;
+        ctx.shadowColor = '#ff5050';
         ctx.globalAlpha = 0.5 + 0.4 * Math.sin(STATE.realTime * 0.01);
         ctx.beginPath();
-        ctx.arc(this.r * 0.7, 0, this.weakSpotR + 8, 0, TAU);
+        ctx.arc(this.weakSpotOffset, 0, this.weakSpotR + 10, 0, TAU);
         ctx.stroke();
+        // 냉각 모드일 때 — 추가 청록 글로우 (약점 노출 강조)
+        if (this.coolingTime > 0) {
+          ctx.globalAlpha = 0.6;
+          ctx.strokeStyle = '#88ddff';
+          ctx.lineWidth = 6;
+          ctx.shadowColor = '#88ddff';
+          ctx.shadowBlur = 30;
+          ctx.beginPath();
+          ctx.arc(this.weakSpotOffset, 0, this.weakSpotR + 18, 0, TAU);
+          ctx.stroke();
+        }
         ctx.restore();
       }
       // boss HP bar at top is handled by HUD; nothing else to draw
@@ -3020,12 +3501,17 @@ class Boss extends Enemy {
       ctx.fillStyle = '#000';
       ctx.fillRect(0, -3, this.r + 5, 6);
       
-      // weak spot (FRONT)
+      // weak spot (FRONT — 본체보다 앞으로 튀어나옴)
+      // 받침 (메탈릭 stalk)
+      ctx.fillStyle = '#222';
+      const stalkW = this.weakSpotR * 0.5;
+      ctx.fillRect(this.r - 4, -stalkW / 2, this.weakSpotOffset - this.r + 4, stalkW);
+      // 약점 본체
       ctx.fillStyle = '#ffff00';
       ctx.shadowBlur = 30;
       ctx.shadowColor = '#ffff00';
       ctx.beginPath();
-      ctx.arc(this.r + 8, 0, this.weakSpotR * 0.5 + Math.sin(this.phaseTimer * 8) * 2, 0, TAU);
+      ctx.arc(this.weakSpotOffset, 0, this.weakSpotR * 0.5 + Math.sin(this.phaseTimer * 8) * 2, 0, TAU);
       ctx.fill();
     }
     
@@ -3550,16 +4036,94 @@ class SlashEffect {
     }
     if (bossEntity && !bossEntity.dead && !this.bossHit) {
       if (dist(this, bossEntity) < this.radius + bossEntity.r && inCone(bossEntity.x, bossEntity.y)) {
-        bossEntity.takeDamage(this.damage);
-        this.bossHit = true;
-        STATE.hitstop = Math.max(STATE.hitstop, 250);   // 150 → 250
-        STATE.shake = Math.max(STATE.shake, 18);        // 40 → 18
-        for (let i = 0; i < 25; i++) {
-          const a = Math.random() * TAU;
-          const sp = rand(200, 550);
-          particles.push(new Particle(bossEntity.x, bossEntity.y, Math.cos(a) * sp, Math.sin(a) * sp, rand(0.4, 0.9), i % 3 === 0 ? '#ffffff' : '#ff5050', 7));
+        // 크랙슨 돌진 카운터: 크랙슨이 charging(긴 돌격) 또는 트리플 대시 dashing 중이면
+        //   슬래시로 정면 카운터 시 → 양쪽 넉백 + 크랙슨은 장애물에 부딪힌 것처럼 기절
+        const isCrackson = bossEntity.level === 2;
+        const crackChargingNow = isCrackson && (
+          bossEntity.charging === true ||
+          bossEntity.tripleDashState === 'dashing'
+        );
+        
+        if (crackChargingNow) {
+          // 1) 양쪽 넉백 — 슬래시 충돌점에서 두 사람을 서로 밀어냄
+          // 보스 → 카운터한 슬래시 발신점 반대 방향으로 밀려남
+          const knockAngle = angleTo(this, bossEntity);   // 슬래시 중심 → 보스 방향
+          const bossKnock = 320;
+          bossEntity.x += Math.cos(knockAngle) * bossKnock;
+          bossEntity.y += Math.sin(knockAngle) * bossKnock;
+          // 플레이어 → 보스 반대 방향으로 살짝 밀려남 (카운터의 반동)
+          if (player) {
+            const playerKnock = 180;
+            player.x += Math.cos(knockAngle + Math.PI) * playerKnock;
+            player.y += Math.sin(knockAngle + Math.PI) * playerKnock;
+            player.x = clamp(player.x, player.r, WORLD.w - player.r);
+            player.y = clamp(player.y, player.r, WORLD.h - player.r);
+          }
+          // 보스도 월드 안으로 클램프
+          bossEntity.x = clamp(bossEntity.x, bossEntity.r, WORLD.w - bossEntity.r);
+          bossEntity.y = clamp(bossEntity.y, bossEntity.r, WORLD.h - bossEntity.r);
+          
+          // 2) 크랙슨 기절 — 장애물에 부딪힌 것과 동일하게
+          bossEntity.charging = false;
+          // 트리플 대시는 즉시 종료 (남은 돌진 횟수도 0)
+          if (bossEntity.tripleDashState === 'dashing') {
+            bossEntity.tripleDashState = 'idle';
+            bossEntity.tripleDashRemaining = 0;
+            bossEntity.tripleDashCd = rand(7, 10);
+          }
+          bossEntity.stunFromWall = 1.5;
+          
+          // 3) 카운터 보너스 데미지 — 방패 무시하고 직접 적용
+          //    (정면으로 받아치는 거라 방패가 깨진다는 의미)
+          // 일반 슬래시 데미지는 takeDamage 통해서 (시각 피드백 + EMP 등 효과 위해)
+          bossEntity.takeDamage(this.damage);
+          // 카운터 보너스 — 방패 무시 직접 적용
+          if (!bossEntity.dead) {
+            bossEntity.hp -= 8;
+            bossEntity.hitFlash = 0.15;
+            damageNumbers.push(new DmgNumber(bossEntity.x, bossEntity.y - 30, 8, '#ffaa00'));
+            if (bossEntity.hp <= 0) bossEntity.die();
+          }
+          this.bossHit = true;
+          
+          // 4) 강한 임팩트 (카운터 한 만큼 시각/사운드 강조)
+          STATE.hitstop = Math.max(STATE.hitstop, 350);
+          STATE.shake = Math.max(STATE.shake, 35);
+          sfx('explode');
+          sfx('slash');
+          
+          // 카운터 파티클 (큰 폭발)
+          for (let i = 0; i < 50; i++) {
+            const a = Math.random() * TAU;
+            const sp = rand(250, 700);
+            particles.push(new Particle(
+              bossEntity.x, bossEntity.y,
+              Math.cos(a) * sp, Math.sin(a) * sp,
+              rand(0.4, 1.0),
+              i % 3 === 0 ? '#ffffff' : (i % 3 === 1 ? '#ff5050' : '#ffcc00'),
+              rand(6, 9)
+            ));
+          }
+          // 카운터 충격파 링
+          effects.push(new SlashImpactFlash(bossEntity.x, bossEntity.y));
+          effects.push(new Explosion(bossEntity.x, bossEntity.y, 280, 0));
+          
+          // 알림 메시지 + 데미지 숫자
+          damageNumbers.push(new DmgNumber(bossEntity.x, bossEntity.y - 60, 0, '#ffcc00', 'COUNTER!'));
+          showFlash('!!', '#ffcc00');
+        } else {
+          // 일반 슬래시 적중
+          bossEntity.takeDamage(this.damage);
+          this.bossHit = true;
+          STATE.hitstop = Math.max(STATE.hitstop, 250);   // 150 → 250
+          STATE.shake = Math.max(STATE.shake, 18);        // 40 → 18
+          for (let i = 0; i < 25; i++) {
+            const a = Math.random() * TAU;
+            const sp = rand(200, 550);
+            particles.push(new Particle(bossEntity.x, bossEntity.y, Math.cos(a) * sp, Math.sin(a) * sp, rand(0.4, 0.9), i % 3 === 0 ? '#ffffff' : '#ff5050', 7));
+          }
+          effects.push(new SlashImpactFlash(bossEntity.x, bossEntity.y));
         }
-        effects.push(new SlashImpactFlash(bossEntity.x, bossEntity.y));
       }
     }
     
@@ -3617,7 +4181,10 @@ class SlashEffect {
         eb.dx = nx * newSpeed;
         eb.dy = ny * newSpeed;
         eb.fromPlayer = true;
-        eb.damage = Math.max(eb.damage, 5);  // 데미지도 ↑
+        // 패링 데미지 — 슬래시 단계에 따라 크게 증가
+        // stage 0: 8, stage 1: 12, stage 2: 18, stage 3: 25
+        const parryDmgs = [4, 6, 9, 13];
+        eb.damage = Math.max(eb.damage, parryDmgs[Math.min(this.stage, 3)]);
         this.reflectedBullets.add(eb);
         
         STATE.hitstop = Math.max(STATE.hitstop, 140);    // 80 → 140
@@ -3872,6 +4439,9 @@ const ANIMATIONS = {
   walk:  { src: 'images/player_move.png',  frameW: 128, frameH: 128, frameCount: 4, fps: 8,  loop: true  },
   shoot: { src: 'images/player_shoot.png', frameW: 128, frameH: 128, frameCount: 1, fps: 16, loop: false },
   slash: { src: 'images/player_slash.png', frameW: 128, frameH: 128, frameCount: 1, fps: 14, loop: false },
+  // 슬라이딩(구르기) 전용 이미지 — 파일이 없으면 자동으로 walk 로 폴백
+  // 한 장이거나 가로로 N프레임 스프라이트시트로 만들면 됨.
+  slide: { src: 'images/player_slide.png', frameW: 128, frameH: 128, frameCount: 1, fps: 12, loop: false },
 };
 
 // =============================================================
@@ -4331,6 +4901,14 @@ document.querySelectorAll('[data-close]').forEach(el => {
     const id = el.dataset.close;
     if (id === 'shopModal') closeShop();
     else if (id === 'cheatModal') closeCheat();
+    else if (id === 'howtoModal') {
+      document.getElementById(id).classList.remove('active');
+      // 게임 중이었다면 일시정지 해제 (다른 모달이 열려있지 않을 때만)
+      STATE.howtoOpen = false;
+      if (STATE.running && !STATE.inShop && !STATE.inLimitBreak && !STATE.inCheat) {
+        STATE.paused = false;
+      }
+    }
     else document.getElementById(id).classList.remove('active');
   });
 });
@@ -4610,14 +5188,15 @@ function gameLoop(now) {
   lastTime = now;
   
   // 시스템 커서 표시 여부 — 게임 진행 중이 아니면 무조건 표시
-  // (메인화면, 상점, 한계돌파, 게임오버, 일시정지, 치트, 일반 메뉴 등에서 마우스 보이도록)
+  // (메인화면, 상점, 한계돌파, 게임오버, 일시정지, 치트, 하우투, 일반 메뉴 등에서 마우스 보이도록)
   const inMenu = !STATE.running
                  || STATE.paused
                  || STATE.inShop
                  || STATE.inLimitBreak
                  || STATE.gameOver
                  || STATE.ended
-                 || STATE.inCheat;
+                 || STATE.inCheat
+                 || STATE.howtoOpen;
   document.body.style.cursor = inMenu ? 'default' : 'none';
   
   if (!STATE.running) {
@@ -4637,6 +5216,10 @@ function gameLoop(now) {
   if (!STATE.paused && !STATE.gameOver && !STATE.ended) {
     STATE.time += realDt;
     update(realDt);
+  } else {
+    // 일시정지/게임오버/엔딩 시 슬로우모션 자동 해제 (시안 오버레이도 페이드)
+    STATE.slowMo = false;
+    STATE.slowMoIntensity = Math.max(0, STATE.slowMoIntensity - dt * 4);
   }
   
   // Update screen shake decay
@@ -4658,7 +5241,7 @@ function gameLoop(now) {
   updateHUD();
   
   // Pause text
-  document.getElementById('pauseText').style.display = (STATE.inShop || STATE.inCheat) ? 'block' : 'none';
+  document.getElementById('pauseText').style.display = (STATE.inShop || STATE.inCheat || STATE.howtoOpen) ? 'block' : 'none';
   
   requestAnimationFrame(gameLoop);
 }
@@ -4667,17 +5250,31 @@ function update(dt) {
   if (player) player.update(dt);
   if (drone) drone.update(dt);
   
+  // 슬로우모션: 플레이어 외 모든 entity의 시간만 느리게
+  // STATE.slowMo는 player.update 안에서 설정됨 (이 시점엔 이미 갱신된 상태)
+  const enemyDt = STATE.slowMo ? dt * STATE.slowMoFactor : dt;
+  
+  // 슬로우모션 시각 강도 페이드 (켜고 끌 때 부드럽게)
+  if (STATE.slowMo) {
+    STATE.slowMoIntensity = Math.min(1, STATE.slowMoIntensity + dt * 6);
+  } else {
+    STATE.slowMoIntensity = Math.max(0, STATE.slowMoIntensity - dt * 4);
+  }
+  
   // Player vs obstacles
   if (player && !player.rolling) resolvePlayerObstacles();
   
-  // Update entities
-  for (const en of enemies) en.update(dt);
-  if (bossEntity) bossEntity.update(dt);
-  for (const b of bullets) b.update(dt);
-  for (const eb of enemyBullets) eb.update(dt);
-  for (const p of particles) p.update(dt);
-  for (const pk of pickups) pk.update(dt);
-  for (const e of effects) e.update(dt);
+  // Update entities — 적/총알/효과는 슬로우모션 영향 받음
+  for (const en of enemies) en.update(enemyDt);
+  if (bossEntity) bossEntity.update(enemyDt);
+  for (const b of bullets) b.update(dt);                  // 플레이어 총알은 정상속도 (플레이어가 쏘는 거니까)
+  for (const eb of enemyBullets) {
+    // 플레이어가 반사한 총알은 정상속도, 적 총알은 슬로우모션
+    eb.update(eb.fromPlayer ? dt : enemyDt);
+  }
+  for (const p of particles) p.update(dt);                // 파티클은 정상속도 유지 (시각 효과)
+  for (const pk of pickups) pk.update(dt);                // 픽업도 정상속도 (플레이어와 상호작용)
+  for (const e of effects) e.update(enemyDt);             // 폭격/충격파 등 적 효과는 슬로우
   for (const dn of damageNumbers) dn.update(dt);
   for (const bs of bloodstains) bs.update(dt);
   for (const h of holograms) h.update(dt);
@@ -4767,8 +5364,63 @@ function draw() {
   for (const dn of damageNumbers) dn.draw();
   
   // 커스텀 십자선 커서 — 게임 진행 중일 때만 (메뉴/모달은 시스템 커서)
-  const inMenu = !STATE.running || STATE.paused || STATE.inShop || STATE.inLimitBreak || STATE.gameOver || STATE.ended || STATE.inCheat;
+  const inMenu = !STATE.running || STATE.paused || STATE.inShop || STATE.inLimitBreak || STATE.gameOver || STATE.ended || STATE.inCheat || STATE.howtoOpen;
   if (!inMenu) drawCursor();
+  
+  // 슬로우모션 사이버펑크 오버레이 — 시안 톤 + 스캔라인 + 비네팅
+  if (STATE.slowMoIntensity > 0) {
+    const intensity = STATE.slowMoIntensity;
+    ctx.save();
+    
+    // 시안 컬러 오버레이 (multiply 비슷한 느낌으로 색감 변경)
+    ctx.globalCompositeOperation = 'screen';
+    ctx.fillStyle = `rgba(0, 200, 220, ${0.15 * intensity})`;
+    ctx.fillRect(0, 0, W, H);
+    
+    // 어두운 시안 비네팅 (가장자리 짙게)
+    ctx.globalCompositeOperation = 'multiply';
+    const vg = ctx.createRadialGradient(W/2, H/2, Math.min(W,H) * 0.2, W/2, H/2, Math.max(W,H) * 0.7);
+    vg.addColorStop(0, `rgba(180, 255, 255, 1)`);
+    vg.addColorStop(1, `rgba(20, 60, 100, ${1 - 0.5 * intensity})`);
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+    
+    ctx.globalCompositeOperation = 'source-over';
+    
+    // 가로 스캔라인 (사이버펑크)
+    ctx.fillStyle = `rgba(0, 255, 255, ${0.04 * intensity})`;
+    for (let y = 0; y < H; y += 4) {
+      ctx.fillRect(0, y, W, 1);
+    }
+    
+    // 화면 가장자리 시안 글로우 라인
+    ctx.strokeStyle = `rgba(0, 255, 255, ${0.5 * intensity})`;
+    ctx.lineWidth = 3;
+    ctx.shadowBlur = 30;
+    ctx.shadowColor = '#00ffff';
+    ctx.strokeRect(2, 2, W - 4, H - 4);
+    
+    // 위/아래 살짝 검은 띠 (시네마틱)
+    const barH = 30 * intensity;
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = `rgba(0, 0, 0, ${0.7 * intensity})`;
+    ctx.fillRect(0, 0, W, barH);
+    ctx.fillRect(0, H - barH, W, barH);
+    
+    // 좌측 상단에 "SLOW MODE" 표시
+    if (intensity > 0.5) {
+      ctx.fillStyle = `rgba(0, 255, 255, ${(intensity - 0.5) * 2})`;
+      ctx.font = 'bold 14px Bebas Neue, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.shadowBlur = 12;
+      ctx.shadowColor = '#00ffff';
+      ctx.fillText('▌ TIME DILATION ACTIVE', 18, 60);
+      ctx.shadowBlur = 0;
+    }
+    
+    ctx.restore();
+  }
   
   // 게임오버 시 재시작 안내 (캔버스 상단 중앙)
   if (STATE.gameOver) {
@@ -4910,6 +5562,11 @@ drawTitleBg();
 document.getElementById('startBtn').addEventListener('click', startGame);
 document.getElementById('howtoBtn').addEventListener('click', () => {
   document.getElementById('howtoModal').classList.add('active');
+  // 게임 진행 중이면 일시정지 (타이틀 화면이면 STATE.running=false 라 영향 없음)
+  STATE.howtoOpen = true;
+  if (STATE.running && !STATE.gameOver && !STATE.ended) {
+    STATE.paused = true;
+  }
 });
 
 requestAnimationFrame(gameLoop);
