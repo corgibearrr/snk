@@ -2006,7 +2006,7 @@ class Boss extends Enemy {
       this.speed = 90;
       this.color = '#ff0040';
       this.r = 108;
-      this.weakSpotR = 90;
+      this.weakSpotR = 50;
       this.barrageTimer = 0;
       this.barragePhase = 0;
       this.bombardCd = 0;
@@ -2568,7 +2568,7 @@ class Boss extends Enemy {
           this.laserChargeTime = 0;
           this.laserFireTime = 0;
           this.laserActive = false;
-          showFlash('레이저 차징', '#ff0040');
+          showFlash('레이저 조준중', '#ff0040');
         }
       }
       // ─────────── 페이즈 3: 레이저 (LASER) — 차징 1s + 발사 6s ───────────
@@ -2657,7 +2657,7 @@ class Boss extends Enemy {
             this.laserChargeTime = 0;
             STATE.shake = Math.max(STATE.shake, 20);
             sfx('charge');
-            showFlash('과열 — 냉각 중', '#88ddff');
+            showFlash('냉각 모드 가동', '#88ddff');
           }
         }
       }
@@ -3895,7 +3895,7 @@ const ENTITY_IMAGES = {
   // 보스 (5종) — 기존 대비 약 2배 확대. 회전 X.
   boss_baekgyu:    { src: 'images/boss_baekgyu.png',    size: 128, rotate: false, flip: false },  // 백규
   boss_crackson:   { src: 'images/boss_crackson.png',   size: 180, rotate: false, flip: false },  // 크랙슨
-  boss_reaper:     { src: 'images/boss_reaper.png',     size: 112, rotate: false, flip: false },  // 리퍼
+  boss_reaper:     { src: 'images/boss_reaper.png',     size: 150, rotate: false, flip: false },  // 리퍼
   boss_cp09:       { src: 'images/boss_cp09.png',       size: 160, rotate: false, flip: false },  // CP-09
   boss_geminator:  { src: 'images/boss_geminator.png',  size: 280, rotate: false, flip: false },  // 제미네이터
   
