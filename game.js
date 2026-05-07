@@ -46,6 +46,11 @@ const STATE = {
   slowMoFactor: 0.25,   // 적/총알/효과의 시간 배율 (0.25 = 1/4 속도)
   slowMoIntensity: 0,   // 시각효과 강도 (0~1, 부드럽게 페이드 인/아웃)
   howtoOpen: false,     // How To Play 모달 열림 여부 (게임 일시정지)
+  // 튜토리얼/스토리/컷씬
+  inStory: false,       // 스토리/튜토리얼 컷씬 표시 중 (게임 일시정지)
+  inTutorial: false,    // 튜토리얼 게임플레이 중 (특수 적/장애물)
+  tutorialStep: 0,      // 현재 튜토리얼 단계
+  inBossCutscene: false, // 보스 등장 컷씬 표시 중 (게임 일시정지)
 };
 
 const KEYS = {};
@@ -124,6 +129,21 @@ canvas.addEventListener('mouseup', (e) => {
   }
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// 우클릭 contextmenu 전역 차단 강화 (Chrome 등에서 카타나 충전 중에도
+// 시스템 컨텍스트 메뉴가 뜨지 않도록 문서 전체에서 차단)
+window.addEventListener('contextmenu', (e) => {
+  // 게임 화면(canvas/gameWrap) 위에서만 차단. 외부 임베드 등에선 normal 동작
+  if (e.target === canvas || e.target.closest('#gameWrap')) {
+    e.preventDefault();
+  }
+});
+// 일부 브라우저는 auxclick(2) 도 트리거 → 명시적 차단
+window.addEventListener('auxclick', (e) => {
+  if (e.button === 2 && (e.target === canvas || e.target.closest('#gameWrap'))) {
+    e.preventDefault();
+  }
+});
 
 // =============================================================
 // MATH
@@ -2014,7 +2034,7 @@ class Boss extends Enemy {
     this.spawnedObstacles = 0;
     
     if (level === 1) { // 백규 - revolver rusher
-      this.hp = 50; this.maxHp = 80;          // 20 → 80
+      this.hp = 50; this.maxHp = 50;          // 20 → 50
       this.name = '백규';
       this.speed = 195;
       this.color = '#ffaa00';
@@ -2067,7 +2087,7 @@ class Boss extends Enemy {
       this.slidingCd = 0;
       this.slidingDir = {x: 0, y: 0};
     } else if (level === 4) { // CP-09
-      this.hp = 120; this.maxHp = 420;        // 50 → 120
+      this.hp = 120; this.maxHp = 120;        // 50 → 120
       this.name = 'CP-09';
       this.speed = 75;
       this.color = '#00aaff';
@@ -3598,8 +3618,11 @@ class Pickup {
     this.bounce += dt * 4;
     
     // Magnet (자석) - 범위 크게, 속도 빠르게
+    // 'magnet' 업그레이드: 레벨당 +35% 범위 (1.0 → 1.35 → 1.70 → ...)
+    const magnetLv = (player.upgrades && player.upgrades['magnet']) || 0;
+    const magnetMult = 1 + 0.35 * magnetLv;
     const d = dist(this, player);
-    const magnetRange = 220;   // 기존 100 → 220 (2.2배)
+    const magnetRange = 220 * magnetMult;   // 기본 220, 업그레이드시 확장
     if (d < magnetRange) {
       const a = angleTo(this, player);
       // 가까울수록 더 빠르게 끌려옴 (역제곱 비슷한 느낌)
@@ -4678,6 +4701,7 @@ const SHOP_ITEMS = [
   { key: 'katanaDmg', name: '카타나 데미지', desc: '+30% 데미지', icon: '⚔', cost: (lv) => 130 * Math.pow(2, lv), max: 5 },
   { key: 'katanaRange', name: '카타나 범위', desc: '+20% 범위', icon: '◯', cost: (lv) => 120 * Math.pow(2, lv), max: 5 },
   { key: 'katanaCharge', name: '카타나 충전속도', desc: '+15% 충전속도', icon: '⟲', cost: (lv) => 100 * Math.pow(2, lv), max: 5 },
+  { key: 'magnet', name: '루팅 범위', desc: '아이템 자석 범위 +35%', icon: '🧲', cost: (lv) => 90 * Math.pow(1.7, lv), max: 6 },
 ];
 
 // =============================================================
@@ -4757,6 +4781,7 @@ function updateHUD() {
 function openShop() {
   STATE.inShop = true;
   STATE.paused = true;
+  document.body.classList.add('modal-open');  // HUD가 모달 위로 올라오도록
   const grid = document.getElementById('shopGrid');
   grid.innerHTML = '';
   for (const item of SHOP_ITEMS) {
@@ -4796,6 +4821,7 @@ function buyShop(item) {
 function closeShop() {
   STATE.inShop = false;
   STATE.paused = false;
+  document.body.classList.remove('modal-open');
   document.getElementById('shopModal').classList.remove('active');
 }
 
@@ -4954,17 +4980,35 @@ function spawnEnemyOffscreen() {
   enemies.push(new Enemy(x, y, pickedType));
 }
 
+// 실제 보스 등장(경고 → 등장). 컷씬은 호출 측에서 처리.
 function spawnBoss(forceLevel) {
   const level = forceLevel || STATE.phase;
   
   // 일반 적 모두 제거 (보스 시작 전 정리)
   for (const e of enemies) e.dead = true;
   
-  // 경고 표시
+  // 보스 컷씬 (대화) 먼저 보여주고 그 후에 경고/등장
+  // - 치트로 강제 소환할 때나 페이즈가 자동 트리거할 때나 모두 컷씬 거침
+  // - 이미 컷씬 중이면 중복 방지
+  if (!STATE.inBossCutscene) {
+    STATE.bossActive = true;       // 일반 적 스폰 차단 (컷씬 동안)
+    STATE.bossWarning = true;      // 컷씬 후 등장 대기
+    STATE.bossPendingLevel = level;
+    playBossCutscene(level, () => {
+      _spawnBossWarning(level);
+    });
+    return;
+  }
+  
+  _spawnBossWarning(level);
+}
+
+// 경고 → 보스 등장 (컷씬과 분리)
+function _spawnBossWarning(level) {
   const w = document.getElementById('bossWarning');
   w.style.display = 'flex';
-  STATE.bossActive = true;     // 일반 적 스폰 차단 (경고 동안)
-  STATE.bossWarning = true;    // 보스 등장 대기
+  STATE.bossActive = true;
+  STATE.bossWarning = true;
   STATE.bossPendingLevel = level;
   
   // 2.5초 후 경고 끝 + 보스 등장
@@ -5196,7 +5240,9 @@ function gameLoop(now) {
                  || STATE.gameOver
                  || STATE.ended
                  || STATE.inCheat
-                 || STATE.howtoOpen;
+                 || STATE.howtoOpen
+                 || STATE.inStory
+                 || STATE.inBossCutscene;
   document.body.style.cursor = inMenu ? 'default' : 'none';
   
   if (!STATE.running) {
@@ -5213,11 +5259,11 @@ function gameLoop(now) {
     realDt = dt * 0.05;
   }
   
-  if (!STATE.paused && !STATE.gameOver && !STATE.ended) {
+  if (!STATE.paused && !STATE.gameOver && !STATE.ended && !STATE.inStory && !STATE.inBossCutscene) {
     STATE.time += realDt;
     update(realDt);
   } else {
-    // 일시정지/게임오버/엔딩 시 슬로우모션 자동 해제 (시안 오버레이도 페이드)
+    // 일시정지/게임오버/엔딩/컷씬 시 슬로우모션 자동 해제 (시안 오버레이도 페이드)
     STATE.slowMo = false;
     STATE.slowMoIntensity = Math.max(0, STATE.slowMoIntensity - dt * 4);
   }
@@ -5526,40 +5572,113 @@ function startGame() {
   document.getElementById('bossWarning').style.display = 'none';
   STATE.gameOver = false;
   STATE.ended = false;
+  // 튜토리얼/스토리/컷씬 플래그 초기화 (튜토리얼 완료 후 startGame 재호출 대응)
+  STATE.inTutorial = false;
+  STATE.tutorialStep = 0;
+  STATE.inStory = false;
+  STATE.inBossCutscene = false;
   
   spawnInitialObstacles();
 }
 
-// Title screen background
+// Title screen background — 이미지 위에 깔리는 글리치/노이즈 오버레이
+// (mix-blend-mode: screen 으로 검은 부분은 사라지고 밝은 노이즈만 보임)
 function drawTitleBg() {
   const tbg = document.getElementById('titleBg');
   if (!tbg) return;
   const tctx = tbg.getContext('2d');
-  tbg.width = window.innerWidth;
-  tbg.height = window.innerHeight;
   
-  // Animated streaks
+  function resizeTbg() {
+    // 노이즈는 작은 해상도로 그려도 충분 (성능). 1/2 해상도.
+    tbg.width = Math.floor(window.innerWidth / 2);
+    tbg.height = Math.floor(window.innerHeight / 2);
+    tbg.style.width = window.innerWidth + 'px';
+    tbg.style.height = window.innerHeight + 'px';
+  }
+  resizeTbg();
+  window.addEventListener('resize', resizeTbg);
+  
+  let frame = 0;
+  let glitchUntil = 0;          // 큰 글리치가 발생 중인 프레임 한도
+  let nextGlitchAt = 60;        // 다음 큰 글리치까지 프레임 카운트
+  
   function tick() {
+    // 타이틀 화면 숨겨졌으면 멈춤
     if (document.getElementById('titleScreen').style.display === 'none') return;
-    tctx.fillStyle = 'rgba(8,0,16,0.15)';
-    tctx.fillRect(0, 0, tbg.width, tbg.height);
     
-    for (let i = 0; i < 3; i++) {
-      const y = Math.random() * tbg.height;
-      tctx.strokeStyle = `rgba(255, ${Math.random() * 100 + 32}, 80, ${0.2 + Math.random() * 0.4})`;
-      tctx.lineWidth = Math.random() * 3 + 1;
-      tctx.beginPath();
-      tctx.moveTo(0, y);
-      tctx.lineTo(tbg.width, y);
-      tctx.stroke();
+    frame++;
+    const W = tbg.width, H = tbg.height;
+    
+    // 1) 캔버스 클리어 (완전 투명) — mix-blend-mode: screen 이면 투명은 검정과 같음
+    tctx.clearRect(0, 0, W, H);
+    
+    // 2) TV 정전기 풍 미세 노이즈: 랜덤 점 드문드문 찍기
+    //    매 프레임 약간만 그려서 어른거리는 느낌 (너무 많으면 화면이 뿌예짐)
+    const dotCount = 600;
+    for (let i = 0; i < dotCount; i++) {
+      const x = (Math.random() * W) | 0;
+      const y = (Math.random() * H) | 0;
+      const v = Math.random();
+      // 대부분은 흰 노이즈, 가끔 빨강/시안 (사이버펑크 톤)
+      let r, g, b;
+      if (v < 0.85) { r = g = b = 200 + Math.random() * 55 | 0; }
+      else if (v < 0.93) { r = 255; g = 40; b = 80; }
+      else { r = 0; g = 220; b = 255; }
+      const a = 0.15 + Math.random() * 0.4;
+      tctx.fillStyle = `rgba(${r},${g},${b},${a})`;
+      tctx.fillRect(x, y, 1, 1);
     }
+    
+    // 3) 얇은 가로 글리치 라인 (스캔라인 위 가끔 빛나는 줄)
+    const lineCount = 2 + (Math.random() < 0.3 ? 2 : 0);
+    for (let i = 0; i < lineCount; i++) {
+      const y = (Math.random() * H) | 0;
+      const v = Math.random();
+      const color = v < 0.6 ? `rgba(255,255,255,${0.15 + Math.random() * 0.3})`
+                  : v < 0.85 ? `rgba(255, 40, 80, ${0.25 + Math.random() * 0.4})`
+                  : `rgba(0, 220, 255, ${0.25 + Math.random() * 0.4})`;
+      tctx.fillStyle = color;
+      tctx.fillRect(0, y, W, Math.random() < 0.5 ? 1 : 2);
+    }
+    
+    // 4) 큰 글리치 (가로 tear) — 불규칙 간격으로 0.1~0.3초 동안만 발생
+    nextGlitchAt--;
+    if (nextGlitchAt <= 0 && glitchUntil < frame) {
+      glitchUntil = frame + 4 + (Math.random() * 10) | 0;
+      nextGlitchAt = 60 + (Math.random() * 200) | 0;  // 1~4초마다
+    }
+    if (glitchUntil > frame) {
+      // 화면 일부에 굵은 글리치 밴드 — RGB 채널 어긋나는 느낌
+      const bandY = (Math.random() * H) | 0;
+      const bandH = 6 + (Math.random() * 30) | 0;
+      // 노이즈 블록 여러 개
+      for (let i = 0; i < 8; i++) {
+        const x = (Math.random() * W) | 0;
+        const w = 20 + (Math.random() * 120) | 0;
+        const v = Math.random();
+        const color = v < 0.5 ? `rgba(255, 40, 80, 0.55)`
+                    : v < 0.85 ? `rgba(0, 220, 255, 0.55)`
+                    : `rgba(255, 255, 255, 0.7)`;
+        tctx.fillStyle = color;
+        tctx.fillRect(x, bandY + (Math.random() * 4 - 2) | 0, w, bandH);
+      }
+    }
+    
     requestAnimationFrame(tick);
   }
   tick();
 }
 drawTitleBg();
 
-document.getElementById('startBtn').addEventListener('click', startGame);
+document.getElementById('startBtn').addEventListener('click', () => startGame(false));
+document.getElementById('tutorialBtn').addEventListener('click', () => {
+  // 튜토리얼: 인트로 스토리 → 튜토리얼 게임플레이 → 본 게임
+  document.getElementById('titleScreen').style.display = 'none';
+  initAudio();
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  if (musicOn) startMusic();
+  playIntroStory();
+});
 document.getElementById('howtoBtn').addEventListener('click', () => {
   document.getElementById('howtoModal').classList.add('active');
   // 게임 진행 중이면 일시정지 (타이틀 화면이면 STATE.running=false 라 영향 없음)
@@ -5568,5 +5687,570 @@ document.getElementById('howtoBtn').addEventListener('click', () => {
     STATE.paused = true;
   }
 });
+
+// =============================================================
+// STORY / DIALOGUE SYSTEM
+// =============================================================
+// 대사 라인 형식:
+//   { name: '이름', text: '대사', portrait: '이미지경로(선택)', side: 'left'|'right' (선택, 기본 left) }
+// portrait이 빈 문자열이면 이미지 안 바꿈 (이전 이미지 유지),
+// null이면 이미지 숨김.
+// playDialogue(lines, screenId, onDone) - 모달형 컷씬 한 번 재생
+
+let _dlgState = null;
+
+/**
+ * 일반 대화 컷씬 재생기. 다른 컷씬에서도 재사용.
+ * @param {Array} lines - {name, text, portrait, side, portraitRight} 배열
+ * @param {string} screenId - 'storyScreen' or 'bossCutscene'
+ * @param {Function} onDone - 끝나면 호출
+ */
+function playDialogue(lines, screenId, onDone) {
+  const screen = document.getElementById(screenId);
+  if (!screen) { if (onDone) onDone(); return; }
+  
+  _dlgState = {
+    lines: lines.slice(),
+    idx: -1,
+    screenId,
+    onDone: onDone || (() => {}),
+    // 타이핑 효과
+    typing: false,
+    fullText: '',
+    typedLen: 0,
+    typeTimer: 0,
+  };
+  
+  if (screenId === 'bossCutscene') {
+    STATE.inBossCutscene = true;
+  } else {
+    STATE.inStory = true;
+  }
+  
+  screen.classList.add('show');
+  _dlgAdvance();
+}
+
+function _dlgAdvance() {
+  if (!_dlgState) return;
+  
+  // 타이핑 중이면 즉시 완료
+  if (_dlgState.typing) {
+    _dlgState.typedLen = _dlgState.fullText.length;
+    _renderDlgText();
+    _dlgState.typing = false;
+    return;
+  }
+  
+  _dlgState.idx++;
+  if (_dlgState.idx >= _dlgState.lines.length) {
+    _dlgEnd();
+    return;
+  }
+  
+  const line = _dlgState.lines[_dlgState.idx];
+  const screenId = _dlgState.screenId;
+  
+  // 이름/포트레이트 ID는 화면별로 다름
+  let nameId, textId, portraitId;
+  if (screenId === 'bossCutscene') {
+    nameId = 'bossDialogueName';
+    textId = 'bossDialogueText';
+  } else {
+    nameId = 'storyName';
+    textId = 'storyText';
+  }
+  
+  document.getElementById(nameId).textContent = line.name || '';
+  
+  // 보스 컷씬은 보스가 우측, 플레이어가 좌측. 일반 스토리는 좌측 한 명.
+  if (screenId === 'bossCutscene') {
+    const bossPort = document.getElementById('bossPortrait');
+    const playerPort = document.getElementById('bossCutscenePlayerPortrait');
+    
+    // 좌측 (플레이어) 포트레이트 처리
+    if (line.side === 'left' || line.side === 'player') {
+      if (line.portrait) {
+        playerPort.src = line.portrait;
+        playerPort.classList.add('show');
+      } else if (line.portrait === null) {
+        playerPort.classList.remove('show');
+      }
+      bossPort.style.filter = 'drop-shadow(0 0 25px rgba(0,200,255,0.2)) brightness(0.5)';
+      playerPort.style.filter = 'drop-shadow(0 0 25px rgba(255,32,80,0.5)) brightness(1)';
+    } else {
+      // right (보스) 또는 미지정
+      if (line.portrait !== undefined && line.portrait !== '') {
+        if (line.portrait === null) {
+          bossPort.classList.remove('show');
+        } else {
+          bossPort.src = line.portrait;
+          bossPort.classList.add('show');
+        }
+      }
+      bossPort.style.filter = 'drop-shadow(0 0 25px rgba(255,32,80,0.5)) brightness(1)';
+      playerPort.style.filter = 'drop-shadow(0 0 25px rgba(0,200,255,0.2)) brightness(0.5)';
+    }
+  } else {
+    // 일반 스토리: 좌측 단일 포트레이트
+    const portrait = document.getElementById('storyPortrait');
+    if (line.portrait !== undefined && line.portrait !== '') {
+      if (line.portrait === null) {
+        portrait.classList.remove('show');
+      } else {
+        portrait.src = line.portrait;
+        portrait.classList.add('show');
+      }
+    }
+  }
+  
+  // 타이핑 시작
+  _dlgState.fullText = line.text || '';
+  _dlgState.typedLen = 0;
+  _dlgState.typing = true;
+  _dlgState.typeTimer = 0;
+  _renderDlgText();
+}
+
+function _renderDlgText() {
+  if (!_dlgState) return;
+  const textId = _dlgState.screenId === 'bossCutscene' ? 'bossDialogueText' : 'storyText';
+  const el = document.getElementById(textId);
+  if (el) el.textContent = _dlgState.fullText.slice(0, _dlgState.typedLen);
+}
+
+// 타이핑 애니메이션 (gameLoop 와 별개의 타이머)
+setInterval(() => {
+  if (!_dlgState || !_dlgState.typing) return;
+  _dlgState.typedLen = Math.min(_dlgState.fullText.length, _dlgState.typedLen + 2);
+  _renderDlgText();
+  if (_dlgState.typedLen >= _dlgState.fullText.length) {
+    _dlgState.typing = false;
+  }
+}, 25);
+
+function _dlgEnd() {
+  if (!_dlgState) return;
+  const screenId = _dlgState.screenId;
+  const onDone = _dlgState.onDone;
+  
+  document.getElementById(screenId).classList.remove('show');
+  // 포트레이트 숨김
+  if (screenId === 'storyScreen') {
+    document.getElementById('storyPortrait').classList.remove('show');
+  } else {
+    document.getElementById('bossPortrait').classList.remove('show');
+    document.getElementById('bossCutscenePlayerPortrait').classList.remove('show');
+  }
+  
+  if (screenId === 'bossCutscene') {
+    STATE.inBossCutscene = false;
+  } else {
+    STATE.inStory = false;
+  }
+  
+  _dlgState = null;
+  if (onDone) onDone();
+}
+
+// 클릭/스페이스로 대사 진행
+window.addEventListener('keydown', (e) => {
+  if (!_dlgState) return;
+  if (e.key === ' ' || e.key === 'Enter') {
+    e.preventDefault();
+    _dlgAdvance();
+  }
+  if (e.key === 'Escape') {
+    // ESC = 컷씬 스킵
+    const screenId = _dlgState.screenId;
+    const onDone = _dlgState.onDone;
+    document.getElementById(screenId).classList.remove('show');
+    if (screenId === 'bossCutscene') STATE.inBossCutscene = false;
+    else STATE.inStory = false;
+    _dlgState = null;
+    if (onDone) onDone();
+  }
+});
+document.getElementById('storyScreen').addEventListener('click', () => {
+  if (_dlgState && _dlgState.screenId === 'storyScreen') _dlgAdvance();
+});
+document.getElementById('bossCutscene').addEventListener('click', () => {
+  if (_dlgState && _dlgState.screenId === 'bossCutscene') _dlgAdvance();
+});
+
+// =============================================================
+// INTRO STORY (튜토리얼 시작 시)
+// =============================================================
+// 주인공: 참진리연구회 요원
+// 상황: 우주 해적이 빼돌린 연구물자 회수하러 컨테이너 항구에 침투
+//
+// 대사 확장: INTRO_LINES 배열에 더 추가하면 됨.
+// portrait 경로: images/standing.png (이미 게임에서 쓰는 주인공 스탠딩)
+// 다른 캐릭터 추가하려면 images/ 폴더에 png 넣고 경로 지정.
+const INTRO_LINES = [
+  { name: '???', text: '...STATION 44 도크. 여기가 맞다.', portrait: 'images/standing.png' },
+  { name: '사마엘', text: '여기에 우리 참진리연구회의 탈취당한 샘플이 있다. \n그것도 \"진리\"의 모방 샘플을.' },
+  { name: '사마엘', text: '잃어버린 우리 물건을 도로 가져가는 게 임무.'},
+  { name: '사마엘', text: '컨테이너 더미 사이로 간다.\n조용히, 빠르게.' },
+  { name: '???', text: '— 침입자다! 누군가 부두에 들어왔어!', portrait: null },
+  { name: '사마엘', text: '...들켰군.', portrait: 'images/standing.png' },
+  { name: '사마엘', text: '뭐, 어쩔 수 없지.\n어차피 진리에 함부로 손댄자는 모두 죽어야한다.' },
+];
+
+function playIntroStory() {
+  playDialogue(INTRO_LINES, 'storyScreen', () => {
+    // 인트로 끝 → 튜토리얼 게임플레이 시작
+    startTutorial();
+  });
+}
+
+// =============================================================
+// TUTORIAL GAMEPLAY
+// =============================================================
+// 단계별로 hint를 띄우고, 조건 충족 시 다음 단계로.
+// 마지막 단계 끝 → 암전 → 본 게임 시작.
+
+const TUTORIAL_STEPS = [
+  {
+    title: '이동',
+    text: 'WASD 키로 사방을 이동해보자.',
+    progress: '1 / 8',
+    check: (s) => s.movedDist > 400,  // 충분히 움직이면 통과
+  },
+  {
+    title: '샷건 사격',
+    text: '마우스 좌클릭으로 샷건 3발을 쏜다.\n시험 표적을 부숴보자.',
+    progress: '2 / 8',
+    check: (s) => s.targetsBroken >= 1,
+  },
+  {
+    title: '샷건 충전 사격',
+    text: '좌클릭을 길게 눌러 충전, 떼면 일제 사격.\n많이 충전할수록 강력하다.',
+    progress: '3 / 8',
+    check: (s) => s.chargedShots >= 1,
+  },
+  {
+    title: '카타나 베기',
+    text: '마우스 우클릭으로 카타나를 휘두른다.\n실전에선 날아오는 총알을 반사할 수도 있다.',
+    progress: '4 / 8',
+    check: (s) => s.slashesPerformed >= 2,
+  },
+  {
+    title: '카타나 패링',
+    text: '한 번 더 휘둘러보자.\n타이밍을 맞춰 휘두르면 적의 총알이 되돌아간다.',
+    progress: '5 / 8',
+    check: (s) => s.slashesPerformed >= 4,
+  },
+  {
+    title: '카타나 충전',
+    text: '우클릭을 오래 누르면 3단계까지 충전.\n광범위한 일격을 가할 수 있다. (배터리 소모)',
+    progress: '6 / 8',
+    check: (s) => s.chargedSlashes >= 1,
+  },
+  {
+    title: '슬라이딩 회피',
+    text: 'SPACE로 짧게 미끄러져 회피한다.\n무적이지만 배터리를 소모한다.',
+    progress: '7 / 8',
+    check: (s) => s.rolls >= 1,
+  },
+  {
+    title: '시간 슬로우 / 배터리',
+    text: 'SHIFT를 누르면 적과 총알이 느려진다.\n배터리는 모든 능력의 근원이니 잘 관리할 것.',
+    progress: '8 / 8',
+    check: (s) => s.slowMoUsed >= 1,
+  },
+];
+
+let TUTORIAL_TRACK = null;
+
+function startTutorial() {
+  // 일반 startGame 과 비슷하지만 적/보스 자동 스폰 끔
+  initAudio();
+  document.getElementById('titleScreen').style.display = 'none';
+  document.getElementById('hud').style.display = 'block';
+  
+  player = new Player();
+  enemies = [];
+  bullets = [];
+  enemyBullets = [];
+  particles = [];
+  pickups = [];
+  effects = [];
+  damageNumbers = [];
+  bloodstains = [];
+  obstacles = [];
+  respawnQueue = [];
+  holograms = [];
+  bossEntity = null;
+  drone = null;
+  
+  STATE.running = true;
+  STATE.paused = false;
+  STATE.phase = 1;
+  STATE.phaseStartTime = 0;
+  STATE.time = 0;
+  STATE.bossActive = true;       // 자동 보스 스폰 차단
+  STATE.bossWarning = false;
+  STATE.bossDefeated = false;
+  STATE.gameOver = false;
+  STATE.ended = false;
+  STATE.inTutorial = true;
+  STATE.tutorialStep = 0;
+  
+  // 추적 데이터
+  TUTORIAL_TRACK = {
+    movedDist: 0,
+    lastX: player.x,
+    lastY: player.y,
+    targetsBroken: 0,
+    chargedShots: 0,    // 1+ 충전 후 발사 카운트
+    slashesPerformed: 0,
+    chargedSlashes: 0,
+    rolls: 0,
+    slowMoUsed: 0,
+    slowMoTimer: 0,
+    prevRolling: false,
+    prevSlashCharge: 0,
+  };
+  
+  spawnInitialObstacles();
+  
+  // 튜토리얼용 시험 표적 (폭발 통)을 플레이어 근처에 배치 — 부수기 좋게
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * TAU + 0.3;
+    const r = 320;
+    const tx = player.x + Math.cos(a) * r;
+    const ty = player.y + Math.sin(a) * r;
+    if (typeof Obstacle === 'function') {
+      const ob = new Obstacle(tx, ty, true);  // explosive = true
+      obstacles.push(ob);
+    }
+  }
+  
+  // 첫 힌트
+  showTutorialHint(0);
+}
+
+function showTutorialHint(stepIdx) {
+  const step = TUTORIAL_STEPS[stepIdx];
+  const el = document.getElementById('tutorialHint');
+  if (!step || !el) return;
+  document.getElementById('tutorialHintTitle').textContent = step.title;
+  document.getElementById('tutorialHintText').textContent = step.text;
+  document.getElementById('tutorialHintProgress').textContent = step.progress;
+  el.classList.add('show');
+}
+
+function hideTutorialHint() {
+  const el = document.getElementById('tutorialHint');
+  if (el) el.classList.remove('show');
+}
+
+// gameLoop에서 매 프레임 호출 — 튜토리얼 진행 체크
+function updateTutorial(dt) {
+  if (!STATE.inTutorial || !TUTORIAL_TRACK || !player) return;
+  
+  // 추적 갱신
+  const t = TUTORIAL_TRACK;
+  const moved = Math.hypot(player.x - t.lastX, player.y - t.lastY);
+  t.movedDist += moved;
+  t.lastX = player.x;
+  t.lastY = player.y;
+  
+  // 슬로우모션 사용 추적
+  if (STATE.slowMo) {
+    t.slowMoTimer += dt;
+    if (t.slowMoTimer > 0.5) t.slowMoUsed = Math.max(t.slowMoUsed, 1);
+  }
+  
+  // 슬라이딩 추적 (rolling false → true 전환)
+  if (player.rolling && !t.prevRolling) {
+    t.rolls++;
+  }
+  t.prevRolling = player.rolling;
+  
+  // 표적 부순 거: Obstacle.takeDamage 후킹에서 직접 카운트되므로 여기선 처리 안 함.
+  
+  // 단계 체크
+  const step = TUTORIAL_STEPS[STATE.tutorialStep];
+  if (step && step.check(t)) {
+    STATE.tutorialStep++;
+    sfx('pickup');
+    if (STATE.tutorialStep >= TUTORIAL_STEPS.length) {
+      // 튜토리얼 완료
+      hideTutorialHint();
+      finishTutorial();
+    } else {
+      showTutorialHint(STATE.tutorialStep);
+      // 새 단계 시작 시 추가 표적/세팅
+      onTutorialStepStart(STATE.tutorialStep);
+    }
+  }
+}
+
+function onTutorialStepStart(stepIdx) {
+  // 카타나 베기 단계: 적이 약하게 공격하는 더미 추가하면 좋지만,
+  // 게임플레이 단순화를 위해 그냥 계속 진행 (우클릭만 하면 통과)
+  // 슬라이딩 단계: 추가 폭발 통 두 개 더 배치
+  if (stepIdx === 6 && typeof Obstacle === 'function') {
+    for (let i = 0; i < 2; i++) {
+      const a = Math.random() * TAU;
+      const r = 280;
+      obstacles.push(new Obstacle(player.x + Math.cos(a) * r, player.y + Math.sin(a) * r, true));
+    }
+  }
+}
+
+// 튜토리얼 → 본 게임 (암전 후 시작)
+function finishTutorial() {
+  // 짧은 안내 후 암전 → 본 게임
+  showTutorialHint(0);  // 임시로 마지막 힌트 갱신
+  document.getElementById('tutorialHintTitle').textContent = '준비됐다';
+  document.getElementById('tutorialHintText').textContent = '본격적인 임무를 시작한다.';
+  document.getElementById('tutorialHintProgress').textContent = '완료';
+  document.getElementById('tutorialHint').classList.add('show');
+  
+  setTimeout(() => {
+    hideTutorialHint();
+    // 암전
+    const fade = document.getElementById('blackFade');
+    fade.classList.add('active');
+    setTimeout(() => {
+      // 본 게임 상태로 전환
+      STATE.inTutorial = false;
+      TUTORIAL_TRACK = null;
+      startGame(true);  // tutorial 직후 호출 — 부드럽게 본 게임 시작
+      // 페이드 아웃
+      setTimeout(() => fade.classList.remove('active'), 100);
+    }, 1000);
+  }, 1800);
+}
+
+// =============================================================
+// startGame 수정: 튜토리얼 직후 호출되면 단순 초기화만
+// =============================================================
+const _origStartGame = startGame;
+// (위 startGame 함수는 이미 정의돼 있고 이 시점에서 우리가 다시 정의하지 않음.
+//  대신 인자가 있을 때 흐름 분기를 추가하기 위해 startGame 정의를 직접 못 건드리니,
+//  여기서 startBtn 핸들러는 startGame 만 호출하면 됨.
+//  finishTutorial 에서는 startGame() 호출 → 튜토리얼 플래그가 false 라면 정상 흐름)
+
+// =============================================================
+// BOSS CUTSCENE
+// =============================================================
+// 보스별 대사. 확장 가능한 구조 — 한 줄 더 넣고 싶으면 배열에 push.
+// portrait: 이미지 경로. 없으면 빈 문자열 또는 null
+// side: 'right' = 보스, 'left' = 플레이어
+const BOSS_CUTSCENES = {
+  // 페이즈 1: 백규
+  1: [
+    { side: 'right', name: '백규', text: '여기까지 들어온 놈은 처음이군.', portrait: 'images/boss1_baekgyu.png' },
+    { side: 'left',  name: '사마엘', text: '샘플 어딨어. 곱게 내놓으면 살려두지.', portrait: 'images/standing.png' },
+    { side: 'right', name: '백규', text: '하하, 농담은.\n일단 죽여서 끌어낼까.', portrait: 'images/boss1_baekgyu.png' },
+  ],
+  // 페이즈 2: 크랙슨
+  2: [
+    { side: 'right', name: '크랙슨', text: '— 백규를 죽인 놈이 너냐.', portrait: 'images/boss2_crackson.png' },
+    { side: 'left',  name: '사마엘', text: '...', portrait: 'images/standing.png' },
+    { side: 'right', name: '크랙슨', text: '말이 없군. 좋아.\n그럼 비명부터 지르게 해주지.', portrait: 'images/boss2_crackson.png' },
+  ],
+  // 페이즈 3: 리퍼
+  3: [
+    { side: 'right', name: '???', text: '...너, 참진리연구회지.', portrait: 'images/boss3_reaper.png' },
+    { side: 'left',  name: '사마엘', text: '샘플 내놔.', portrait: 'images/standing.png' },
+    { side: 'right', name: '리퍼', text: '진리를 독점하려는 네놈들의 수작은 끝났다.', portrait: 'images/boss3_reaper.png' },
+    { side: 'right', name: '리퍼', text: '샘플은 이미 다른 곳으로 옮겼어.\n네가 와봐야 늦었다는 뜻이지.', portrait: 'images/boss3_reaper.png' },
+  ],
+  // 페이즈 4: CP-09
+  4: [
+    { side: 'right', name: 'CP-09', text: '— 적성 식별. 회수반 요원.\n위협등급 갱신: 격상.', portrait: 'images/boss4_cp09.png' },
+    { side: 'left',  name: '사마엘', text: '기계인가. 그쪽이 더 깔끔하겠군.', portrait: 'images/standing.png' },
+    { side: 'right', name: 'CP-09', text: '제거 절차 개시.', portrait: 'images/boss4_cp09.png' },
+  ],
+  // 페이즈 5: 제미네이터 (최종 보스)
+  5: [
+    { side: 'right', name: '제미네이터', text: '여기까지 왔나, 회수반.', portrait: 'images/boss5_geminator.png' },
+    { side: 'left',  name: '사마엘', text: '네녀석이 마지막인가? \n슬슬 지겹군.', portrait: 'images/standing.png' },
+    { side: 'right', name: '제미네이터', text: '\"진리\"는 독점할 수 있는게 아니야.\n우주는 모두에게 열려 있어야지.', portrait: 'images/boss5_geminator.png' },
+    { side: 'left',  name: '사마엘', text: '너희 같은 무지렁이들이 진리를 들여다보면\n그건 진리가 아니라 재앙이 된다.', portrait: 'images/standing.png' },
+    { side: 'right', name: '제미네이터', text: '과연 그럴까? 한번 진리의 힘을 시험해보자고.', portrait: 'images/boss5_geminator.png' },
+  ],
+};
+
+function playBossCutscene(level, onDone) {
+  const lines = BOSS_CUTSCENES[level];
+  if (!lines || !lines.length) {
+    if (onDone) onDone();
+    return;
+  }
+  playDialogue(lines, 'bossCutscene', onDone);
+}
+
+// =============================================================
+// gameLoop 안에서 튜토리얼 진행 체크
+// =============================================================
+// gameLoop의 update() 호출 후에 튜토리얼 추적 함수가 돌아가도록 후킹.
+// gameLoop는 STATE.inStory/inBossCutscene 시 update를 호출하지 않음 (위 분기 참고).
+const _origUpdate = update;
+// eslint-disable-next-line no-func-assign
+update = function(dt) {
+  _origUpdate(dt);
+  if (STATE.inTutorial) updateTutorial(dt);
+};
+
+// 튜토리얼 중에는 보스 자동 트리거 무시 — STATE.bossActive 를 true 로 두면 됨 (이미 startTutorial 에서 함)
+// 또한 페이즈 0 (튜토리얼)에서 자동 보스 트리거 안 됨
+
+// 추적: 충전샷 발사 카운트, 카타나 휘두르기/충전 카타나 카운트
+// player.releaseShoot/releaseSlash를 후킹.
+(function patchPlayerForTutorial() {
+  // 클래스가 정의된 시점에 prototype 메서드를 후킹.
+  if (typeof Player !== 'function') return;
+  const _origReleaseShoot = Player.prototype.releaseShoot;
+  Player.prototype.releaseShoot = function(...args) {
+    const wasMulti = this.charged >= 2;
+    const prevFireCd = this.fireCooldown;
+    const ret = _origReleaseShoot.apply(this, args);
+    // 실제로 발사됐는지 — fireCooldown 이 갱신됐으면 발사된 것.
+    const fired = this.fireCooldown !== prevFireCd && this.fireCooldown > 0;
+    if (STATE.inTutorial && TUTORIAL_TRACK && wasMulti && fired) {
+      TUTORIAL_TRACK.chargedShots++;
+    }
+    return ret;
+  };
+  const _origReleaseSlash = Player.prototype.releaseSlash;
+  Player.prototype.releaseSlash = function(...args) {
+    const wasStage = this.slashCharge;
+    const prevCd = this.slashCooldown;
+    const ret = _origReleaseSlash.apply(this, args);
+    // 실제로 슬래시가 발생했는지: slashCooldown 이 길게(>= 0.2s) 갱신되면 휘두른 것.
+    // 헛스윙(배터리 부족)은 0.15s 만 걸리고, 쿨다운 중일 땐 변화 없음.
+    const slashed = this.slashCooldown >= 0.2 && this.slashCooldown !== prevCd;
+    if (STATE.inTutorial && TUTORIAL_TRACK && slashed) {
+      TUTORIAL_TRACK.slashesPerformed++;
+      if (wasStage >= 2) TUTORIAL_TRACK.chargedSlashes++;
+    }
+    return ret;
+  };
+})();
+
+// Obstacle 후킹 — takeDamage 시 dead 가 되는 순간 표적 카운트.
+// updateTutorial 에서 obstacles 배열을 검사하면 이미 filter로 제거된 후라 늦음 → 직접 후킹.
+(function patchObstacleForTutorial() {
+  if (typeof Obstacle !== 'function') return;
+  const _origObTakeDamage = Obstacle.prototype.takeDamage;
+  Obstacle.prototype.takeDamage = function(d) {
+    const wasAlive = !this.dead;
+    _origObTakeDamage.apply(this, arguments);
+    if (STATE.inTutorial && TUTORIAL_TRACK && wasAlive && this.dead) {
+      TUTORIAL_TRACK.targetsBroken++;
+    }
+  };
+})();
+
+// =============================================================
+// startGame 보강: 튜토리얼 종료 후 호출되면 인트로 알림 띄우고 시작
+// =============================================================
+// (인자 fromTutorial 은 startGame 원본은 모르지만, 일단 그냥 무시해도 동작 OK)
 
 requestAnimationFrame(gameLoop);

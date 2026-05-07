@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>SHOTGUN & KATANA</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=JetBrains+Mono:wght@400;700&family=Black+Ops+One&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;700&display=swap');
   
   * { margin: 0; padding: 0; box-sizing: border-box; }
   
@@ -35,38 +35,96 @@
   #titleScreen {
     position: absolute;
     inset: 0;
-    background: 
-      radial-gradient(ellipse at 30% 20%, rgba(255,40,80,0.18), transparent 60%),
-      radial-gradient(ellipse at 70% 80%, rgba(0,200,255,0.15), transparent 60%),
-      linear-gradient(180deg, #0a0008 0%, #1a0510 50%, #050008 100%);
+    background: #050008;  /* 이미지 못 뜰 때 폴백용 어두운 베이스 */
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-end;  /* 버튼을 아래쪽에 모으기 */
+    padding-bottom: 8vh;
     z-index: 100;
     overflow: hidden;
   }
   
+  /* 타이틀 풀스크린 배경 이미지 */
+  #titleImage {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;            /* 화면 가득, 잘리는 부분은 자연스럽게 */
+    object-position: center;
+    z-index: 0;
+    pointer-events: none;
+    /* 살짝 색감 강화 (사이버펑크 톤) */
+    filter: saturate(1.05);
+  }
+  
+  /* 이미지 위 어두운 베일 (버튼 가독성) */
+  #titleScreen::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+      /* 아래쪽으로 갈수록 어두워짐 (버튼 영역) */
+      linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0) 40%, rgba(0,0,0,0.55) 78%, rgba(0,0,0,0.85) 100%),
+      /* 미세한 사이버펑크 톤 (좌상단 빨강, 우하단 청록) */
+      radial-gradient(ellipse at 25% 15%, rgba(255,40,80,0.10), transparent 55%),
+      radial-gradient(ellipse at 75% 85%, rgba(0,200,255,0.10), transparent 55%);
+    z-index: 1;
+    pointer-events: none;
+  }
+  
+  /* 이미지 위 스캔라인/CRT 노이즈 */
   #titleScreen::before {
     content: '';
     position: absolute;
     inset: 0;
     background-image:
-      repeating-linear-gradient(0deg, transparent 0, transparent 2px, rgba(255,255,255,0.02) 2px, rgba(255,255,255,0.02) 4px);
+      /* 가로 스캔라인 (CRT) */
+      repeating-linear-gradient(0deg,
+        transparent 0,
+        transparent 2px,
+        rgba(255,255,255,0.04) 2px,
+        rgba(255,255,255,0.04) 3px),
+      /* 미세 세로선 (디지털 글리치 느낌) */
+      repeating-linear-gradient(90deg,
+        transparent 0,
+        transparent 3px,
+        rgba(0,0,0,0.08) 3px,
+        rgba(0,0,0,0.08) 4px);
+    z-index: 2;
     pointer-events: none;
+    animation: scanlineDrift 8s linear infinite;
   }
   
+  @keyframes scanlineDrift {
+    0%   { background-position: 0 0, 0 0; }
+    100% { background-position: 0 100px, 0 0; }
+  }
+  
+  /* 노이즈 오버레이 (별도 캔버스로 그릴 거임) */
   .title-bg {
     position: absolute;
     inset: 0;
-    z-index: 0;
-    opacity: 0.3;
+    width: 100%;
+    height: 100%;
+    z-index: 3;
+    opacity: 0.55;             /* 노이즈 강도 — 너무 약하면 0.7~0.8까지 올려도 OK */
+    mix-blend-mode: screen;    /* 검은 배경에서 노이즈가 밝게 떠 보이도록 */
+    pointer-events: none;
+    image-rendering: pixelated;  /* 1/2 해상도 노이즈를 픽셀처럼 보이게 */
   }
   
+  /* 타이틀 콘텐츠 (버튼 + 폴백 텍스트) - 위 모든 오버레이보다 위에 */
   .title-content {
     position: relative;
-    z-index: 2;
+    z-index: 4;
     text-align: center;
+  }
+  
+  /* 폴백 텍스트 타이틀 (title.png 못 불러왔을 때만 표시) */
+  #titleTextFallback {
+    margin-bottom: 40px;
   }
   
   #titleScreen h1 {
@@ -155,6 +213,15 @@
     z-index: 10;
     font-family: 'Bebas Neue', sans-serif;
   }
+  
+  /* 상점/한계돌파 모달 열렸을 때 HUD를 모달 위로 올리기.
+     #hud 자체의 z-index 를 올려야 stacking context 가 적용됨. */
+  body.modal-open #hud {
+    z-index: 60;  /* modal(50) 위 */
+  }
+  
+  /* 단, 보스HP나 limit break/flash 등 다른 HUD 요소는 모달이 열려도
+     화면 위로 올라오지 않게 하고 싶다면 여기서 추가 조정 가능 */
   
   .hud-top-left {
     position: absolute;
@@ -623,6 +690,189 @@
     background: rgba(255,32,80,0.5);
   }
   
+  /* === MODAL: HOW TO PLAY 등 (타이틀 위에서도 보이도록 z-index 상향) === */
+  #howtoModal {
+    z-index: 150;  /* titleScreen(100) 위 */
+  }
+  
+  /* === STORY / TUTORIAL === */
+  #storyScreen {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, #000 0%, #0a0010 100%);
+    display: none;
+    z-index: 110;
+    overflow: hidden;
+  }
+  
+  #storyScreen.show { display: block; }
+  
+  /* 캐릭터 스탠딩(좌측) */
+  .story-portrait {
+    position: absolute;
+    left: 4vw;
+    bottom: 0;
+    height: 78vh;
+    max-width: 45vw;
+    object-fit: contain;
+    object-position: bottom left;
+    filter: drop-shadow(0 0 25px rgba(255,32,80,0.4));
+    pointer-events: none;
+    transition: opacity 0.4s, transform 0.4s;
+    opacity: 0;
+  }
+  
+  .story-portrait.show {
+    opacity: 1;
+  }
+  
+  /* 보스 컷씬용 - 우측 배치 */
+  .story-portrait.right {
+    left: auto;
+    right: 4vw;
+    object-position: bottom right;
+    filter: drop-shadow(0 0 25px rgba(0,200,255,0.4));
+  }
+  
+  /* 대화창 */
+  .story-dialogue {
+    position: absolute;
+    bottom: 4vh;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 80vw;
+    max-width: 1000px;
+    background: rgba(10, 5, 20, 0.92);
+    border: 3px solid #ff2050;
+    box-shadow: 0 0 40px rgba(255,32,80,0.5), inset 0 0 30px rgba(0,0,0,0.5);
+    padding: 28px 40px;
+    backdrop-filter: blur(8px);
+  }
+  
+  .story-name {
+    font-family: 'Black Ops One', cursive;
+    font-size: 22px;
+    color: #ffcc00;
+    letter-spacing: 4px;
+    margin-bottom: 12px;
+    text-shadow: 0 0 12px #ffcc00;
+  }
+  
+  .story-text {
+    font-size: 18px;
+    color: #fff;
+    letter-spacing: 1px;
+    line-height: 1.7;
+    min-height: 90px;
+    white-space: pre-wrap;
+  }
+  
+  .story-next-hint {
+    position: absolute;
+    right: 24px;
+    bottom: 12px;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #888;
+    animation: blinkHint 1.2s infinite;
+  }
+  
+  @keyframes blinkHint {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+  
+  .story-skip-hint {
+    position: absolute;
+    top: 20px;
+    right: 24px;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 12px;
+    letter-spacing: 3px;
+    color: #555;
+  }
+  
+  /* === TUTORIAL HINT (게임 안에서 단계별 안내) === */
+  #tutorialHint {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -150px);
+    background: rgba(10, 5, 20, 0.92);
+    border: 2px solid #00d4ff;
+    box-shadow: 0 0 30px rgba(0,200,255,0.5);
+    padding: 20px 32px;
+    z-index: 30;
+    display: none;
+    pointer-events: none;
+    text-align: center;
+    backdrop-filter: blur(6px);
+    min-width: 380px;
+  }
+  
+  #tutorialHint.show { display: block; }
+  
+  #tutorialHint .hint-title {
+    font-family: 'Black Ops One', cursive;
+    font-size: 18px;
+    color: #00d4ff;
+    letter-spacing: 4px;
+    margin-bottom: 8px;
+    text-shadow: 0 0 10px #00d4ff;
+  }
+  
+  #tutorialHint .hint-text {
+    font-size: 15px;
+    color: #fff;
+    letter-spacing: 1px;
+    line-height: 1.6;
+  }
+  
+  #tutorialHint .hint-progress {
+    margin-top: 10px;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 12px;
+    letter-spacing: 3px;
+    color: #888;
+  }
+  
+  /* === BLACK FADE === */
+  #blackFade {
+    position: absolute;
+    inset: 0;
+    background: #000;
+    z-index: 130;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 1s;
+  }
+  
+  #blackFade.active {
+    opacity: 1;
+    pointer-events: all;
+  }
+  
+  /* === BOSS CUTSCENE === */
+  #bossCutscene {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(20,0,10,0.95) 0%, rgba(0,0,5,0.98) 100%);
+    display: none;
+    z-index: 120;
+  }
+  
+  #bossCutscene.show { display: block; animation: fadeIn 0.6s; }
+  
+  /* === ENDING IMAGE === */
+  .ending-image {
+    max-width: 90vw;
+    max-height: 60vh;
+    object-fit: contain;
+    margin-bottom: 30px;
+    filter: drop-shadow(0 0 30px rgba(255,204,0,0.5));
+  }
+  
   /* === SCROLLBAR === */
   ::-webkit-scrollbar { width: 8px; }
   ::-webkit-scrollbar-track { background: #110008; }
@@ -635,16 +885,61 @@
   
   <!-- TITLE SCREEN -->
   <div id="titleScreen">
+    <!-- 풀스크린 배경 이미지 (없으면 자동으로 텍스트 타이틀 폴백) -->
+    <img id="titleImage" src="images/title.png" alt=""
+         onerror="this.style.display='none'; document.getElementById('titleTextFallback').style.display='block';">
+    <!-- 노이즈 캔버스 (이미지 위 살짝 깔리는 동적 노이즈) -->
     <canvas class="title-bg" id="titleBg"></canvas>
+    
     <div class="title-content">
-      <h1>SHOTGUN<span class="amp">&amp;</span>KATANA</h1>
-      <div class="subtitle">샷건 &amp; 카타나</div>
-      <button class="menu-btn" id="startBtn">GAME START</button>
+      <!-- 폴백: 이미지 못 불러왔을 때만 보임 -->
+      <div id="titleTextFallback" style="display:none;">
+        <h1>SHOTGUN<span class="amp">&amp;</span>KATANA</h1>
+        <div class="subtitle">샷건 &amp; 카타나</div>
+      </div>
+      <button class="menu-btn" id="tutorialBtn">TUTORIAL</button>
+      <br>
+      <button class="menu-btn" id="startBtn">SKIP &amp; PLAY</button>
       <br>
       <button class="menu-btn secondary" id="howtoBtn">HOW TO PLAY</button>
     </div>
     <div class="credit">Created by Corgibear — 2026</div>
   </div>
+  
+  <!-- STORY / TUTORIAL CUTSCENE -->
+  <div id="storyScreen">
+    <img class="story-portrait" id="storyPortrait" src="" alt=""
+         onerror="this.classList.remove('show');">
+    <div class="story-skip-hint">[ESC] SKIP</div>
+    <div class="story-dialogue">
+      <div class="story-name" id="storyName">???</div>
+      <div class="story-text" id="storyText">...</div>
+      <div class="story-next-hint" id="storyNextHint">▼ CLICK / SPACE</div>
+    </div>
+  </div>
+  
+  <!-- BOSS CUTSCENE (게임 도중) -->
+  <div id="bossCutscene">
+    <img class="story-portrait right" id="bossPortrait" src="" alt=""
+         onerror="this.classList.remove('show');">
+    <img class="story-portrait" id="bossCutscenePlayerPortrait" src="" alt=""
+         onerror="this.classList.remove('show');">
+    <div class="story-dialogue">
+      <div class="story-name" id="bossDialogueName">???</div>
+      <div class="story-text" id="bossDialogueText">...</div>
+      <div class="story-next-hint">▼ CLICK / SPACE</div>
+    </div>
+  </div>
+  
+  <!-- TUTORIAL HINT (게임 안에서) -->
+  <div id="tutorialHint">
+    <div class="hint-title" id="tutorialHintTitle">TUTORIAL</div>
+    <div class="hint-text" id="tutorialHintText">...</div>
+    <div class="hint-progress" id="tutorialHintProgress">1 / 8</div>
+  </div>
+  
+  <!-- BLACK FADE -->
+  <div id="blackFade"></div>
   
   <!-- HOW TO PLAY -->
   <div class="modal" id="howtoModal">
@@ -659,9 +954,10 @@
         <p><b style="color:#ffcc00">우클릭 (탭)</b> — 카타나 휘두르기 (투사체 반사 + 적 베기)</p>
         <p><b style="color:#ffcc00">우클릭 (홀드)</b> — 3단계 충전 카타나 (배터리 소모)</p>
         <p><b style="color:#ffcc00">SPACE</b> — 구르기 (무적, 배터리 소모)</p>
+        <p><b style="color:#ffcc00">SHIFT</b> — 시간 가속 (적들 느려짐, 배터리 소모)</p>
         <p><b style="color:#ffcc00">E</b> — 캐롯마켓 온라인 몰 (BTC로 업그레이드)</p>
-        <p><b style="color:#ff2050">한 방에 사망. 살아남아라.</b></p>
-        <p style="color:#666; font-size:12px;">치트: <b>` (백틱)</b> 3번 연타</p>
+        <p><b style="color:#ff2050">피격시 목숨 -1. 살아남아라.</b></p>
+       
       </div>
       <button class="modal-close" data-close="howtoModal">CLOSE</button>
     </div>
@@ -708,7 +1004,7 @@
     <div id="bossWarning"><div class="text">⚠ 경고 ⚠<small>극심위협체 접근중</small></div></div>
     <div id="flashMessage"></div>
     
-    <div class="pause-overlay-text" id="pauseText">PAUSED</div>
+    <div class="pause-overlay-text" id="pauseText"></div>
   </div>
   
   <!-- LIMIT BREAK -->
@@ -716,7 +1012,7 @@
     <div id="limitBreakText">한계 돌파</div>
     <div class="modal-content" style="margin-top: 100px;">
       <h2 style="color:#ff2050;">LIMIT BREAK</h2>
-      <div class="subtitle-mini">한계를 돌파하라 · 하나를 선택</div>
+      <div class="subtitle-mini">긴급 구속제어 해제절차</div>
       <div class="upgrade-grid" id="limitBreakGrid" style="grid-template-columns: repeat(3, 1fr);"></div>
     </div>
   </div>
@@ -725,7 +1021,7 @@
   <div class="modal" id="shopModal">
     <div class="modal-content">
       <h2 style="color:#ffcc00;">🥕 캐롯마켓 온라인 몰</h2>
-      <div class="subtitle-mini">CARROT MARKET ONLINE · BTC로 업그레이드</div>
+      <div class="subtitle-mini">CARROT MARKET ONLINE · BTC만 받습니다</div>
       <div class="upgrade-grid" id="shopGrid"></div>
       <button class="modal-close" data-close="shopModal">EXIT (E)</button>
     </div>
@@ -759,7 +1055,7 @@
         <div class="upgrade-grid" style="grid-template-columns: repeat(5, 1fr);">
           <div class="upgrade-card" data-bosslevel="1" style="border-color:#ffaa00;">
             <h3 style="font-size:14px;">1. 백규</h3>
-            <p style="font-size:11px;">HP 20</p>
+            <p style="font-size:11px;">HP 30</p>
           </div>
           <div class="upgrade-card" data-bosslevel="2" style="border-color:#888;">
             <h3 style="font-size:14px;">2. 크랙슨</h3>
@@ -791,8 +1087,10 @@
   
   <!-- ENDING -->
   <div id="endingScreen">
+    <img class="ending-image" id="endingImage" src="images/ending.png" alt=""
+         onerror="this.style.display='none';">
     <h1>VICTORY</h1>
-    <p>당신은 모든 위협을 분쇄했다.<br>네온 거리에 다시 침묵이 깔린다.</p>
+    <p>모든 연구 물자를 회수하는데 성공했다.<br>진리는 다시 우리만의 것이다.</p>
     <button class="menu-btn" onclick="location.reload()">PLAY AGAIN</button>
   </div>
 </div>
