@@ -575,13 +575,16 @@
   #endingScreen {
     position: absolute;
     inset: 0;
-    background: linear-gradient(180deg, #000 0%, #200010 100%);
+    background: #050008;  /* 이미지 못 뜰 때 폴백 */
     display: none;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     z-index: 200;
     text-align: center;
+    overflow: hidden;
+    padding: 4vh 0;
+    box-sizing: border-box;
   }
   
   #endingScreen.show { display: flex; animation: fadeIn 2s; }
@@ -593,42 +596,45 @@
   
   #endingScreen h1 {
     font-family: 'Black Ops One', cursive;
-    font-size: 100px;
+    font-size: 92px;
     color: #ffcc00;
     text-shadow: 0 0 40px #ffcc00, 0 0 80px #ff2050;
     letter-spacing: 12px;
-    margin-bottom: 20px;
+    margin: 0 0 8px;
   }
   
   #endingScreen p {
-    font-size: 20px;
+    font-size: 18px;
     color: #fff;
     letter-spacing: 4px;
-    margin-bottom: 40px;
-    line-height: 1.8;
+    margin: 0 0 18px;
+    line-height: 1.7;
   }
   
   /* === GAME OVER === */
   #gameOverScreen {
     position: absolute;
     inset: 0;
-    background: rgba(20,0,0,0.92);
+    background: #100005;  /* 폴백 */
     display: none;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     z-index: 200;
+    overflow: hidden;
+    padding: 4vh 0;
+    box-sizing: border-box;
   }
   
   #gameOverScreen.show { display: flex; }
   
   #gameOverScreen h1 {
     font-family: 'Black Ops One', cursive;
-    font-size: 120px;
+    font-size: 108px;
     color: #ff0030;
     text-shadow: 0 0 30px #ff0030;
     letter-spacing: 10px;
-    margin-bottom: 30px;
+    margin: 0 0 16px;
   }
   
   /* === PAUSE TEXT === */
@@ -864,13 +870,65 @@
   
   #bossCutscene.show { display: block; animation: fadeIn 0.6s; }
   
-  /* === ENDING IMAGE === */
-  .ending-image {
-    max-width: 90vw;
-    max-height: 60vh;
-    object-fit: contain;
-    margin-bottom: 30px;
-    filter: drop-shadow(0 0 30px rgba(255,204,0,0.5));
+  /* === ENDING / GAME OVER 풀스크린 배경 이미지 === */
+  /* 타이틀과 같은 방식: 화면 가득 채운 뒤 위에 어두운 베일 + 스캔라인 */
+  .fullscreen-bg-image {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center;
+    z-index: 0;
+    pointer-events: none;
+    filter: saturate(1.05);
+  }
+  
+  /* 엔딩/게임오버 공통 — 이미지 위 어두운 베일 */
+  #endingScreen::after,
+  #gameOverScreen::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(180deg, rgba(0,0,0,0.25) 0%, rgba(0,0,0,0.35) 35%, rgba(0,0,0,0.78) 100%);
+    z-index: 1;
+    pointer-events: none;
+  }
+  /* 엔딩 — 황금빛 톤 */
+  #endingScreen::after {
+    background:
+      linear-gradient(180deg, rgba(0,0,0,0.20) 0%, rgba(0,0,0,0.30) 35%, rgba(0,0,0,0.78) 100%),
+      radial-gradient(ellipse at 50% 30%, rgba(255,204,0,0.10), transparent 60%);
+  }
+  /* 게임오버 — 핏빛 톤 */
+  #gameOverScreen::after {
+    background:
+      linear-gradient(180deg, rgba(0,0,0,0.25) 0%, rgba(0,0,0,0.40) 35%, rgba(0,0,0,0.85) 100%),
+      radial-gradient(ellipse at 50% 30%, rgba(255,32,80,0.12), transparent 60%);
+  }
+  
+  /* 엔딩/게임오버 — 스캔라인 (타이틀과 동일) */
+  #endingScreen::before,
+  #gameOverScreen::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image:
+      repeating-linear-gradient(0deg,
+        transparent 0,
+        transparent 2px,
+        rgba(255,255,255,0.04) 2px,
+        rgba(255,255,255,0.04) 3px);
+    z-index: 2;
+    pointer-events: none;
+  }
+  
+  /* 텍스트/패널/버튼은 베일 위에 */
+  #endingScreen > *:not(.fullscreen-bg-image),
+  #gameOverScreen > *:not(.fullscreen-bg-image) {
+    position: relative;
+    z-index: 3;
   }
   
   /* === SCROLLBAR === */
@@ -1081,13 +1139,17 @@
   
   <!-- GAME OVER -->
   <div id="gameOverScreen">
+    <!-- 풀스크린 배경 이미지 (없으면 단색 폴백) -->
+    <img class="fullscreen-bg-image" id="gameOverImage" src="images/gameover.png" alt=""
+         onerror="this.style.display='none';">
     <h1>YOU DIED</h1>
     <button class="menu-btn" onclick="location.reload()">RETRY</button>
   </div>
   
   <!-- ENDING -->
   <div id="endingScreen">
-    <img class="ending-image" id="endingImage" src="images/ending.png" alt=""
+    <!-- 풀스크린 배경 이미지 (없으면 단색 폴백) -->
+    <img class="fullscreen-bg-image" id="endingImage" src="images/ending.png" alt=""
          onerror="this.style.display='none';">
     <h1>VICTORY</h1>
     <p>모든 연구 물자를 회수하는데 성공했다.<br>진리는 다시 우리만의 것이다.</p>

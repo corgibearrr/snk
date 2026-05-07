@@ -51,6 +51,11 @@ const STATE = {
   inTutorial: false,    // 튜토리얼 게임플레이 중 (특수 적/장애물)
   tutorialStep: 0,      // 현재 튜토리얼 단계
   inBossCutscene: false, // 보스 등장 컷씬 표시 중 (게임 일시정지)
+  // === 점수/통계 추적 ===
+  kills: 0,             // 잡몹 처치 수
+  bossKills: 0,         // 보스 처치 수
+  totalEarned: 0,       // 누적 획득 BTC (소비해도 깎이지 않음)
+  maxPhaseReached: 1,   // 도달한 최고 페이즈
 };
 
 const KEYS = {};
@@ -510,6 +515,8 @@ class Player {
     this.x = WORLD.w / 2;
     this.y = WORLD.h / 2;
     this.r = 28;
+    this.hitR = 16;            // 실제 피격 판정 (이미지보다 작게)
+    this.grazeR = 32;          // 그레이즈 판정 반경 (hitR보다 큼, 시각적 r과 비슷)
     this.speed = 430;
     this.angle = 0;
     
@@ -557,7 +564,7 @@ class Player {
     this.slashStage3Time = 1.5;
     this.slashCost = [15, 25, 40];
     this.slashRange = [270, 382, 494];     // 기존 [135, 191, 247] × 2 (캐릭터 크기와 동일 비율)
-    this.slashDamage = 1;                  // 칼 휘두르기 기본 데미지 (낮음 — 패링이 메인)
+    this.slashDamage = 2;                  // 칼 휘두르기 기본 데미지 (낮음 — 패링이 메인)
     this.slashCooldown = 0;
     this.slashCdMax = 0.3;
     
@@ -615,6 +622,12 @@ class Player {
     if (this.upgrades['ionSlot']) batteryMaxEff *= (1 + 0.2 * this.upgrades['ionSlot']);
     let regenRate = this.batteryRegen;
     if (this.upgrades['ionCharger']) regenRate *= (1 + 0.2 * this.upgrades['ionCharger']);
+    // 그레이즈 부스트 — 총알이 스쳐갔을 때 일정 시간 재생 가속(×3)
+    if (typeof this.grazeBoost !== 'number') this.grazeBoost = 0;
+    if (this.grazeBoost > 0) {
+      this.grazeBoost -= dt;
+      regenRate *= 3.0;
+    }
     if (this.batteryRegenDelay > 0) {
       this.batteryRegenDelay -= dt;
     } else {
@@ -679,13 +692,15 @@ class Player {
       // - 배터리 빠르게 소모 (계속 누르고 있으면 금방 바닥)
       // - 배터리가 0 이상일 때만 작동, 0 도달 시 자동 해제
       // - 화면에 사이버펑크 시안 톤 + 캐릭터 잔상 효과
-      const slowMoCostPerSec = 35;       // 초당 배터리 35 소모 (스프린트보다 훨씬 빠름)
+      const slowMoCostPerSec = 25;       // 초당 배터리 25 소모 (스프린트보다 훨씬 빠름)
       const slowKey = KEYS['shift'] || KEYS['Shift'] || KEYS['ShiftLeft'] || KEYS['ShiftRight'];
       const isSlowMo = slowKey && this.battery > 0 && !STATE.paused;
       STATE.slowMo = isSlowMo;
       
-      this.x += mx * this.speed * dt;
-      this.y += my * this.speed * dt;
+      // 슬로우모 중엔 플레이어 이동 50% 가속 (적/총알이 느려진 상태에서 더 민첩하게)
+      const moveMult = isSlowMo ? 1.5 : 1.0;
+      this.x += mx * this.speed * dt * moveMult;
+      this.y += my * this.speed * dt * moveMult;
       
       if (isSlowMo) {
         this.battery = Math.max(0, this.battery - slowMoCostPerSec * dt);
@@ -1003,13 +1018,37 @@ class Player {
     
     sfx('slash');
     
-    // Gun-Kata: auto-fire 12 shots
+    // Gun-Kata: 슬래시할 때 가까운 적에게 자동 기본 사격
+    // - 적 1명당 1발 (가까운 순으로 최대 N명)
+    // - 산탄(spread)이 적용되지 않은 깔끔한 단발 (기본 사격)
     if (this.hasUpgrade('gunKata') && this.ammo > 0) {
-      const n = Math.min(12, this.ammo);
-      this.ammo -= n;
-      for (let i = 0; i < n; i++) {
-        const a = (i / n) * TAU;
+      const maxTargets = 6;          // 한 번에 최대 6명에게
+      const maxRange = 700;          // 자동 사격 사정거리
+      // 후보: 살아있는 적 + 보스
+      const candidates = [];
+      for (const en of enemies) {
+        if (en.dead) continue;
+        const dE = dist(this, en);
+        if (dE <= maxRange) candidates.push({ ent: en, d: dE });
+      }
+      if (bossEntity && !bossEntity.dead) {
+        const dB = dist(this, bossEntity);
+        if (dB <= maxRange) candidates.push({ ent: bossEntity, d: dB });
+      }
+      // 가까운 순 정렬
+      candidates.sort((a, b) => a.d - b.d);
+      const targets = candidates.slice(0, maxTargets);
+      const shots = Math.min(targets.length, this.ammo);
+      this.ammo -= shots;
+      for (let i = 0; i < shots; i++) {
+        const t = targets[i].ent;
+        const a = angleTo(this, t);
         bullets.push(new Bullet(this.x, this.y, Math.cos(a) * this.bulletSpeed, Math.sin(a) * this.bulletSpeed, this.rangeEff(), 1));
+        // 발사 머즐 잔영
+        for (let j = 0; j < 3; j++) {
+          const pa = a + rand(-0.2, 0.2);
+          particles.push(new Particle(this.x, this.y, Math.cos(pa) * rand(120, 220), Math.sin(pa) * rand(120, 220), 0.18, '#ffcc00', 3));
+        }
       }
     }
     
@@ -1417,7 +1456,7 @@ class Bullet {
       
       if (dist(this, en) < effectiveR + this.r) {
         const wasAlive = !en.dead;
-        en.takeDamage(this.damage);
+        en.takeDamage(this.damage, 'bullet');
         if (player.hasUpgrade('emp')) en.stunTimer = 0.4;
         damageNumbers.push(new DmgNumber(en.x, en.y - 30, this.damage, '#ffcc00'));
         // 샷건 처치 시 핏자국 (지속)
@@ -1513,7 +1552,7 @@ class EnemyBullet {
       for (const en of enemies) {
         if (en.dead) continue;
         if (dist(this, en) < en.r + this.r) {
-          en.takeDamage(this.damage);
+          en.takeDamage(this.damage, 'bullet');
           this.dead = true;
           return;
         }
@@ -1528,9 +1567,30 @@ class EnemyBullet {
     } else {
       // Hit player
       if (player && !player.rolling && !STATE.gameOver) {
-        if (dist(this, player) < player.r + this.r) {
+        const dPB = dist(this, player);
+        // 실제 피격 판정 — 이미지보다 작은 hitR 사용
+        if (dPB < player.hitR + this.r) {
           player.takeDamage();
           this.dead = true;
+          return;
+        }
+        // 그레이즈(아슬아슬하게 스침) — hitR < d < grazeR + this.r 영역에서
+        // 한 번만 트리거 (this.grazed 플래그)
+        if (!this.grazed && dPB < player.grazeR + this.r) {
+          this.grazed = true;
+          // 배터리 가속 충전 + 잠시 강한 재생
+          if (typeof player.grazeBoost !== 'number') player.grazeBoost = 0;
+          player.grazeBoost = Math.min(2.0, player.grazeBoost + 0.6);  // 최대 2초까지 누적
+          // 즉시 약간 충전
+          player.battery = Math.min(player.batteryMax * (1 + 0.2 * (player.upgrades['ionSlot'] || 0)), player.battery + 4);
+          // 배터리 재생 딜레이 즉시 해제
+          player.batteryRegenDelay = 0;
+          // 시각/사운드 피드백 — 작은 시안 잔상
+          for (let i = 0; i < 3; i++) {
+            const a = Math.random() * TAU;
+            particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(40, 100), Math.sin(a) * rand(40, 100), 0.25, '#00d4ff', 3));
+          }
+          damageNumbers.push(new DmgNumber(player.x, player.y - 50, 0, '#00d4ff', 'GRAZE'));
         }
       }
     }
@@ -1589,16 +1649,21 @@ class Enemy {
       this.speed = 155;
       this.color = '#ff8030';
       this.preferredDist = 360;
-      this.attackCd = 1.3;
-      this.aimTime = 1.0;     // 사격 전 조준 시간(초)
+      this.attackCd = 1.6;       // 1.3 → 1.6 (연발이라 조금 길게)
+      this.aimTime = 0.7;     // 사격 전 조준 시간(초)
       this.aiming = 0;         // 현재 조준 중인지 (>0 이면 조준 중, 정지)
+      // 3연발 버스트
+      this.burstLeft = 0;       // 남은 연발 발사 수
+      this.burstTimer = 0;      // 다음 연발까지 남은 시간
+      this.burstInterval = 0.12; // 연발 사이 간격(초)
     } else if (type === 'shielder') {
-      this.hp = 10; this.maxHp = 10;
+      this.hp = 3; this.maxHp = 3;            // HP 10 → 3
       this.r = 62;
       this.speed = 75;
       this.color = '#888';
-      this.shieldHp = 10;
-      this.turnSpeed = 1.8;
+      this.shieldHp = 30;                     // 방패 내구도 10 → 30 (×3)
+      this.shieldHpMax = 30;
+      this.turnSpeed = 0.9;                   // 회전 속도 1.8 → 0.9 (1/2)
       this.attackCd = 1.0;
     } else if (type === 'assassin') {
       this.hp = 1; this.maxHp = 1;
@@ -1607,6 +1672,11 @@ class Enemy {
       this.attackRange = 40;
       this.attackCd = 0.4;
       this.dashTimer = 0;
+      // 회피 슬라이딩
+      this.dodgeSlideCd = rand(0.3, 1.0);     // 다음 슬라이드까지 (재평가 주기)
+      this.dodgeSlideTime = 0;                // 슬라이드 지속
+      this.dodgeSlideDir = { x: 0, y: 0 };
+      this.meleeAttackSpeedMult = 2.0;        // 근접 텔레그래프/쿨다운 가속
     } else if (type === 'sniper') {
       this.hp = 1; this.maxHp = 1;
       this.speed = 90;
@@ -1624,10 +1694,31 @@ class Enemy {
     return s.x > -margin && s.x < W + margin && s.y > -margin && s.y < H + margin;
   }
   
-  takeDamage(d) {
+  takeDamage(d, source) {
     if (this.dead) return;
     // 경계면 밖에 있을 때는 무적
     if (!this.isOnScreen()) return;
+    
+    // 어쌔신 회피 슬라이드 중 — 총알에는 무적 (카타나/슬래시는 맞음)
+    if (this.type === 'assassin' && this.dodgeSlideTime > 0 && source === 'bullet') {
+      damageNumbers.push(new DmgNumber(this.x, this.y - 40, 0, '#ff20a0', 'EVADE'));
+      return;
+    }
+    
+    // 방패병: 카타나(슬래시)는 방패를 못 뚫음 — 정면 방어 시 차단
+    if (this.type === 'shielder' && this.shieldHp > 0 && source === 'slash') {
+      // 방패가 플레이어를 향하고 있으면(즉 정면 방어) 차단
+      const playerAngle = angleTo(this, player);
+      let diff = playerAngle - this.angle;
+      while (diff > Math.PI) diff -= TAU;
+      while (diff < -Math.PI) diff += TAU;
+      if (Math.abs(diff) < Math.PI / 2) {
+        damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#88ccff', 'SHIELD'));
+        this.hitFlash = 0.05;
+        return;
+      }
+      // 후면이면 정상 데미지
+    }
     
     this.hp -= d;
     this.hitFlash = 0.1;
@@ -1653,6 +1744,9 @@ class Enemy {
   die() {
     this.dead = true;
     sfx('hit');
+    
+    // 통계: 킬 수 증가 (튜토리얼 적은 카운트 안 함)
+    if (!STATE.inTutorial) STATE.kills++;
     
     // particles
     for (let i = 0; i < 15; i++) {
@@ -1703,18 +1797,40 @@ class Enemy {
     } else if (this.type === 'shooter') {
       this.angle = targetAngle;
       
+      // 연발 진행 중 — burstTimer 카운트다운 후 추가 발사
+      if (this.burstLeft > 0) {
+        this.burstTimer -= dt;
+        if (this.burstTimer <= 0) {
+          if (this.isOnScreen()) {
+            const sp = 840;
+            // 약간의 산탄 흔들림 (연발이라 완벽한 조준은 아님)
+            const jitter = rand(-0.06, 0.06);
+            const a = targetAngle + jitter;
+            enemyBullets.push(new EnemyBullet(this.x, this.y, Math.cos(a) * sp, Math.sin(a) * sp, {color: '#ff8030', r: 12}));
+          }
+          this.burstLeft--;
+          this.burstTimer = this.burstInterval;
+          if (this.burstLeft <= 0) {
+            this.cooldown = this.attackCd;
+          }
+        }
+        // 연발 중에도 천천히 회전(추적)만, 이동은 정지
+        return;  // 다른 행동 차단
+      }
+      
       if (this.aiming > 0) {
         // 조준 중 — 정지하고 카운트다운, 끝나면 발사
         this.aiming -= dt;
         // aimLine 으로 빨간 조준선 시각화 (sniper 와 동일한 방식)
         this.aimLine = { angle: targetAngle, length: d + 60 };
         if (this.aiming <= 0) {
-          // 발사 (화면 밖이면 스킵)
+          // 첫 발사 + 연발 시작 (총 3발)
           if (this.isOnScreen()) {
             const sp = 840;
             enemyBullets.push(new EnemyBullet(this.x, this.y, Math.cos(targetAngle) * sp, Math.sin(targetAngle) * sp, {color: '#ff8030', r: 12}));
           }
-          this.cooldown = this.attackCd;
+          this.burstLeft = 2;          // 추가 2발 (총 3발)
+          this.burstTimer = this.burstInterval;
           this.aiming = 0;
           this.aimLine = null;
         }
@@ -1743,25 +1859,72 @@ class Enemy {
       this.y += Math.sin(this.angle) * this.speed * dt;
       
       if (this.cooldown <= 0 && d < 375 && this.isOnScreen()) {
-        // 방패병 샷건: 3발 산탄
+        // 방패병 샷건: 5발 산탄
         const sp = 660;
-        const spread = 18 * Math.PI / 180;  // 18도 산탄
-        for (let i = -1; i <= 1; i++) {
-          const a = this.angle + i * spread / 2;
+        const spread = 28 * Math.PI / 180;  // 28도 산탄 (5발 펼침)
+        for (let i = -2; i <= 2; i++) {
+          const a = this.angle + i * spread / 4;
           enemyBullets.push(new EnemyBullet(this.x, this.y, Math.cos(a) * sp, Math.sin(a) * sp, {color: '#cccccc'}));
         }
         this.cooldown = this.attackCd;
       }
     } else if (this.type === 'assassin') {
       this.angle = targetAngle;
-      // Erratic movement
-      this.dashTimer -= dt;
-      if (this.dashTimer <= 0) {
-        this.dashAngle = targetAngle + rand(-1, 1);
-        this.dashTimer = rand(0.3, 0.7);
+      
+      // 회피 슬라이딩 처리
+      // 슬라이딩 중이면 슬라이딩 방향으로만 이동, 그 외 행동 없음
+      if (this.dodgeSlideTime > 0) {
+        this.dodgeSlideTime -= dt;
+        const slideSpeed = this.speed * 1.4;
+        this.x += this.dodgeSlideDir.x * slideSpeed * dt;
+        this.y += this.dodgeSlideDir.y * slideSpeed * dt;
+        this.x = clamp(this.x, this.r, WORLD.w - this.r);
+        this.y = clamp(this.y, this.r, WORLD.h - this.r);
+      } else {
+        if (this.dodgeSlideCd > 0) this.dodgeSlideCd -= dt;
+        // 가까운 위협(플레이어 총알) 감지 → 회피 슬라이드
+        if (this.dodgeSlideCd <= 0 && this.isOnScreen()) {
+          let threat = null;
+          let threatDist = Infinity;
+          for (const b of bullets) {
+            if (b.dead) continue;
+            const dB = dist(this, b);
+            if (dB > 220) continue;  // 220 이내 위협만
+            // 진행 방향 기준 자신 쪽으로 오는 총알인지 (대략적인 dot product)
+            const dx = this.x - b.x;
+            const dy = this.y - b.y;
+            const dotN = (dx * b.dx + dy * b.dy);  // 양수면 자신 쪽으로 진행
+            if (dotN <= 0) continue;
+            // 가장 가까운 위협 선택
+            if (dB < threatDist) { threat = b; threatDist = dB; }
+          }
+          if (threat) {
+            // 총알 진행 방향에 수직(좌/우 무작위)으로 회피
+            const blen = Math.hypot(threat.dx, threat.dy) || 1;
+            const perpX = -threat.dy / blen;
+            const perpY =  threat.dx / blen;
+            const sign = Math.random() < 0.5 ? 1 : -1;
+            this.dodgeSlideDir.x = perpX * sign;
+            this.dodgeSlideDir.y = perpY * sign;
+            this.dodgeSlideTime = rand(0.18, 0.32);
+            this.dodgeSlideCd = rand(0.5, 1.2);
+            // 슬라이드 잔영 파티클
+            for (let i = 0; i < 6; i++) {
+              const a = Math.random() * TAU;
+              particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(20, 80), Math.sin(a) * rand(20, 80), 0.25, '#ff20a0', 3));
+            }
+          }
+        }
+        
+        // (회피 중이 아닐 때만) 기존 변칙 이동
+        this.dashTimer -= dt;
+        if (this.dashTimer <= 0) {
+          this.dashAngle = targetAngle + rand(-1, 1);
+          this.dashTimer = rand(0.3, 0.7);
+        }
+        this.x += Math.cos(this.dashAngle) * this.speed * dt;
+        this.y += Math.sin(this.dashAngle) * this.speed * dt;
       }
-      this.x += Math.cos(this.dashAngle) * this.speed * dt;
-      this.y += Math.sin(this.dashAngle) * this.speed * dt;
       // 공격은 아래 telegraph 시스템에서 처리됨
     } else if (this.type === 'sniper') {
       this.angle = targetAngle;
@@ -1807,8 +1970,8 @@ class Enemy {
         attackCd = 0.5;
       } else if (this.type === 'assassin') {
         triggerRange = this.r + player.r + 20;
-        telegraphTime = 0.35;  // 빠른 적은 짧은 예고
-        attackCd = 0.4;
+        telegraphTime = 0.18;  // 0.35 → 0.18 (아주 빠른 근접)
+        attackCd = 0.22;       // 0.4 → 0.22
       } else { // shielder
         triggerRange = this.r + player.r + 30;
         telegraphTime = 0.6;
@@ -2045,6 +2208,13 @@ class Boss extends Enemy {
       this.lateralSlideCd = rand(1.0, 2.5);  // 다음 슬라이드까지 시간 (랜덤)
       this.lateralSlideTime = 0;              // 슬라이드 지속
       this.lateralSlideDir = {x: 0, y: 0};
+      // 부활 시스템 (1회 한정)
+      this.revivesLeft = 1;             // 남은 부활 횟수
+      this.maxRevives = 1;
+      this.reviving = false;            // 부활 중 (무적 회복 페이즈)
+      this.reviveTimer = 0;             // 부활 진행 시간
+      this.reviveDuration = 3.0;        // 무적 회복 3초
+      this.invulnAfterRevive = 0;       // 부활 직후 추가 무적 (페이즈 2 진입 보호)
     } else if (level === 2) { // 크랙슨
       this.hp = 100; this.maxHp = 100;        // 40 → 100
       this.name = '크랙슨';
@@ -2130,6 +2300,17 @@ class Boss extends Enemy {
     // 경계면 밖에 있을 때는 무적 — 단, 리퍼(level 3)는 무한 사거리 사격하므로 패링 반격을 위해 예외
     if (this.level !== 3 && !this.isOnScreen()) return;
     
+    // 백규 부활 회복 페이즈 중엔 완전 무적
+    if (this.level === 1 && this.reviving) {
+      damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#ffaa00', 'REVIVING'));
+      return;
+    }
+    // 백규 부활 직후 추가 무적 (페이즈 2 진입 직후 보호)
+    if (this.level === 1 && this.invulnAfterRevive > 0) {
+      damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#ffaa00', 'INVULN'));
+      return;
+    }
+    
     // 리퍼 슬라이딩 중에는 무적 (회피 액션의 보상)
     if (this.level === 3 && this.slidingTime > 0) {
       // 슬라이드 중 무적임을 시각적으로 표시
@@ -2176,6 +2357,30 @@ class Boss extends Enemy {
     this.hitFlash = 0.1;
     sfx('hit');
     if (this.hp <= 0) {
+      // 백규: 1회 부활 (무적 회복 페이즈를 거친 뒤 풀 HP로 부활)
+      if (this.level === 1 && this.revivesLeft > 0 && !this.reviving) {
+        this.revivesLeft--;
+        this.reviving = true;
+        this.reviveTimer = 0;
+        this.hp = 1;  // 회복 페이즈 동안엔 1로 유지 (무적이라 안 닳음)
+        // 부활 트리거 효과
+        sfx('death');
+        sfx('charge');
+        STATE.shake = 50;
+        STATE.hitstop = 300;
+        for (let i = 0; i < 60; i++) {
+          const a = Math.random() * TAU;
+          particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(80, 380), Math.sin(a) * rand(80, 380), 1.0, '#ffaa00', 8));
+        }
+        effects.push(new Explosion(this.x, this.y, 240, 0));
+        // 진행 중인 공격 패턴 초기화
+        this.summonCd = Math.max(this.summonCd, 2);
+        this.lateralSlideTime = 0;
+        this.lateralSlideCd = rand(1.0, 2.0);
+        // 알림
+        showFlash('백규: 아직 안 끝났다', '#ffaa00');
+        return;
+      }
       // 리퍼: 3목숨 (죽으면 플레이어로부터 멀리 재등장)
       if (this.level === 3 && this.reaperLives > 1) {
         this.reaperLives--;
@@ -2222,6 +2427,9 @@ class Boss extends Enemy {
     sfx('explode');
     sfx('death');
     
+    // 통계: 보스 처치 수 증가
+    STATE.bossKills++;
+    
     // Big explosion
     for (let i = 0; i < 80; i++) {
       const a = Math.random() * TAU;
@@ -2238,6 +2446,53 @@ class Boss extends Enemy {
     if (this.cooldown > 0) this.cooldown -= dt;
     this.hitFlash = Math.max(this.hitFlash - dt, 0);
     this.phaseTimer += dt;
+    
+    // 백규 부활 회복 페이즈: 정지 상태로 무적, HP 게이지가 차오르며 회복
+    if (this.level === 1 && this.reviving) {
+      this.reviveTimer += dt;
+      // HP 게이지가 점점 회복 (시각적 진행도)
+      const t = this.reviveTimer / this.reviveDuration;
+      this.hp = Math.max(1, Math.floor(this.maxHp * t));
+      
+      // 회복 중 빨려들어오는 빨간/노란 파티클 (수렴)
+      if (Math.random() < 0.6) {
+        const ang = Math.random() * TAU;
+        const startR = this.r + 200 + Math.random() * 80;
+        const sx = this.x + Math.cos(ang) * startR;
+        const sy = this.y + Math.sin(ang) * startR;
+        const speed = rand(180, 320);
+        particles.push(new Particle(sx, sy, -Math.cos(ang) * speed, -Math.sin(ang) * speed, 0.6, Math.random() < 0.5 ? '#ffaa00' : '#ff2050', 5));
+      }
+      // 보스 주변 작은 진동
+      this.x += rand(-1, 1);
+      this.y += rand(-1, 1);
+      this.x = clamp(this.x, this.r, WORLD.w - this.r);
+      this.y = clamp(this.y, this.r, WORLD.h - this.r);
+      
+      // 회복 완료 → 페이즈 2 진입
+      if (this.reviveTimer >= this.reviveDuration) {
+        this.reviving = false;
+        this.hp = this.maxHp;
+        this.invulnAfterRevive = 0.8;  // 부활 직후 0.8초 추가 무적
+        // 부활 완료 폭발 효과
+        sfx('explode');
+        STATE.shake = 70;
+        STATE.hitstop = 200;
+        for (let i = 0; i < 80; i++) {
+          const a = Math.random() * TAU;
+          particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(150, 500), Math.sin(a) * rand(150, 500), 1.2, ['#ffaa00', '#ff2050', '#fff'][i%3], 9));
+        }
+        effects.push(new Explosion(this.x, this.y, 320, 0));
+        // 페이즈 2: 더 빨라지고 소환 쿨다운 단축
+        this.speed = 240;       // 195 → 240
+        this.summonCd = 1.5;    // 첫 소환 빨리
+        showFlash('백규: 진심으로 간다', '#ff2050');
+      }
+      return;  // 회복 중엔 다른 행동 안 함
+    }
+    if (this.level === 1 && this.invulnAfterRevive > 0) {
+      this.invulnAfterRevive -= dt;
+    }
     
     const targetAngle = angleTo(this, player);
     const d = dist(this, player);
@@ -3026,6 +3281,62 @@ class Boss extends Enemy {
     ctx.save();
     ctx.translate(s.x, s.y);
     
+    // 백규 부활 회복 페이즈 — 진행률 링 + 오라
+    if (this.level === 1 && this.reviving) {
+      const t = clamp(this.reviveTimer / this.reviveDuration, 0, 1);
+      // 외곽 빨간 오라 (펄싱)
+      const pulse = 0.6 + 0.4 * Math.sin(this.reviveTimer * 8);
+      ctx.save();
+      ctx.shadowBlur = 50;
+      ctx.shadowColor = '#ff2050';
+      ctx.strokeStyle = `rgba(255, 32, 80, ${0.5 * pulse})`;
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r + 14, 0, TAU);
+      ctx.stroke();
+      ctx.restore();
+      // 진행도 호 (보스 위에 게이지)
+      ctx.save();
+      ctx.shadowBlur = 24;
+      ctx.shadowColor = '#ffaa00';
+      ctx.strokeStyle = '#ffaa00';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r + 30, -Math.PI / 2, -Math.PI / 2 + TAU * t);
+      ctx.stroke();
+      // 배경 호 (어두운 트랙)
+      ctx.strokeStyle = 'rgba(80, 30, 30, 0.5)';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r + 30, 0, TAU);
+      ctx.stroke();
+      ctx.restore();
+      // 안쪽 빨간 코어 글로우 (내부에서 차오름)
+      ctx.save();
+      ctx.shadowBlur = 30;
+      ctx.shadowColor = '#ff2050';
+      const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, this.r);
+      grad.addColorStop(0, `rgba(255, 80, 100, ${0.55 * t})`);
+      grad.addColorStop(1, 'rgba(255, 32, 80, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    }
+    // 백규 부활 직후 무적: 짧은 깜빡임 링
+    if (this.level === 1 && this.invulnAfterRevive > 0) {
+      const blink = (Math.sin(this.invulnAfterRevive * 30) + 1) / 2;
+      ctx.save();
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = '#ffaa00';
+      ctx.strokeStyle = `rgba(255, 170, 0, ${0.7 * blink})`;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r + 8, 0, TAU);
+      ctx.stroke();
+      ctx.restore();
+    }
     if (this.aimLine) {
       // 리퍼(level 3): 차징 진행에 따라 라인이 점점 선명해짐
       // - 차징 시작 (t=0): 매우 흐림 (alpha 0.1)
@@ -3082,6 +3393,48 @@ class Boss extends Enemy {
         ctx.stroke();
         ctx.restore();
       }
+    }
+    
+    // 크랙슨: 정면(±90도) 방어 영역 항상 시각화 — 큰 청록 방패 호
+    // (회전 적용 전, this.angle 방향이 정면)
+    if (this.level === 2 && !this.dead) {
+      ctx.save();
+      const a0 = this.angle - Math.PI / 2;
+      const a1 = this.angle + Math.PI / 2;
+      const shR = this.r + 22;          // 방패 호 반경
+      // 외곽 글로우
+      ctx.shadowBlur = 24;
+      ctx.shadowColor = '#88ccff';
+      ctx.strokeStyle = 'rgba(140, 200, 255, 0.85)';
+      ctx.lineWidth = 7;
+      ctx.beginPath();
+      ctx.arc(0, 0, shR, a0, a1);
+      ctx.stroke();
+      // 내부 채움 (반투명 — 차단 영역 명확화)
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(140, 200, 255, 0.10)';
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, shR, a0, a1);
+      ctx.closePath();
+      ctx.fill();
+      // 안쪽 얇은 라인 (테두리 보강)
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, shR - 4, a0, a1);
+      ctx.stroke();
+      // hitFlash 시 방패가 빛남 (차단 피드백)
+      if (this.hitFlash > 0) {
+        ctx.shadowBlur = 30;
+        ctx.shadowColor = '#aaddff';
+        ctx.strokeStyle = `rgba(200, 230, 255, ${Math.min(1, this.hitFlash * 8)})`;
+        ctx.lineWidth = 9;
+        ctx.beginPath();
+        ctx.arc(0, 0, shR, a0, a1);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
     
     // 크랙슨: 돌격 준비 중일 때 빨간 궤도 라인 (회전 적용 전, 보스 중심 기준)
@@ -3617,17 +3970,36 @@ class Pickup {
     if (this.life <= 0) { this.dead = true; return; }
     this.bounce += dt * 4;
     
+    // 맵 밖에 떨어진 아이템: 자석 범위 무시하고 플레이어에게 강제 흡수
+    // (아이템이 폭발 등에 밀려 월드 밖으로 빠져나간 경우 회수 보장)
+    const outOfBounds = (
+      this.x < 0 || this.x > WORLD.w ||
+      this.y < 0 || this.y > WORLD.h
+    );
+    if (outOfBounds) {
+      const a = angleTo(this, player);
+      const pullSpeed = 2800;   // 매우 빠르게 빨려옴
+      this.x += Math.cos(a) * pullSpeed * dt;
+      this.y += Math.sin(a) * pullSpeed * dt;
+      // 가까이 오면 즉시 수거
+      if (dist(this, player) < this.r + player.r + 8) {
+        this.dead = true;
+        this.collect();
+      }
+      return;
+    }
+    
     // Magnet (자석) - 범위 크게, 속도 빠르게
     // 'magnet' 업그레이드: 레벨당 +35% 범위 (1.0 → 1.35 → 1.70 → ...)
     const magnetLv = (player.upgrades && player.upgrades['magnet']) || 0;
     const magnetMult = 1 + 0.35 * magnetLv;
     const d = dist(this, player);
-    const magnetRange = 220 * magnetMult;   // 기본 220, 업그레이드시 확장
+    const magnetRange = 320 * magnetMult;   // 범위도 220 → 320 으로 확장
     if (d < magnetRange) {
       const a = angleTo(this, player);
       // 가까울수록 더 빠르게 끌려옴 (역제곱 비슷한 느낌)
       const proximity = 1 - d / magnetRange;
-      const pullSpeed = 500 + proximity * 800;   // 기존 200 고정 → 500~1300
+      const pullSpeed = 1100 + proximity * 1700;   // 500~1300 → 1100~2800 (훨씬 빠름)
       this.x += Math.cos(a) * pullSpeed * dt;
       this.y += Math.sin(a) * pullSpeed * dt;
     }
@@ -3641,7 +4013,9 @@ class Pickup {
     if (this.type === 'ammo') {
       player.ammo = Math.min(player.ammoMaxEff(), player.ammo + 30);
     } else if (this.type === 'btc') {
-      player.btc += Math.floor(rand(15, 50));
+      const amt = Math.floor(rand(15, 50));
+      player.btc += amt;
+      STATE.totalEarned += amt;
     } else if (this.type === 'battery') {
       player.battery = Math.min(player.batteryMax * (1 + 0.2 * (player.upgrades['ionSlot'] || 0)), player.battery + 50);
     }
@@ -4042,7 +4416,7 @@ class SlashEffect {
       if (en.dead) continue;
       if (this.hitEnemies.has(en)) continue;
       if (dist(this, en) < this.radius + en.r && inCone(en.x, en.y)) {
-        en.takeDamage(this.damage);
+        en.takeDamage(this.damage, 'slash');
         this.hitEnemies.add(en);
         STATE.hitstop = Math.max(STATE.hitstop, 180);   // 110 → 180 (더 멈춤)
         STATE.shake = Math.max(STATE.shake, 14);        // 32 → 14 (덜 흔들림)
@@ -4206,7 +4580,7 @@ class SlashEffect {
         eb.fromPlayer = true;
         // 패링 데미지 — 슬래시 단계에 따라 크게 증가
         // stage 0: 8, stage 1: 12, stage 2: 18, stage 3: 25
-        const parryDmgs = [4, 6, 9, 13];
+        const parryDmgs = [4, 4, 6, 8];
         eb.damage = Math.max(eb.damage, parryDmgs[Math.min(this.stage, 3)]);
         this.reflectedBullets.add(eb);
         
@@ -4678,7 +5052,7 @@ function makeAnimController() {
 const LIMIT_BREAKS = [
   { key: 'emp', name: '전자기총탄', desc: '총에 맞은 적 경직 (보스는 둔화)' },
   { key: 'runAndGun', name: '런앤건', desc: '구르기 사용시 총탄 풀충전' },
-  { key: 'gunKata', name: '건카타', desc: '칼 휘두르면 주변 12발 자동 발사' },
+  { key: 'gunKata', name: '건카타', desc: '칼을 휘두르면 가까운 적들에게 자동 사격' },
   { key: 'slidingBoots', name: '슬라이딩 부츠', desc: '구르기 속도/빈도 증가' },
   { key: 'piercing', name: '관통탄', desc: '50% 확률로 적/장애물 관통' },
   { key: 'shukoji', name: '축지', desc: '구르기로 적 관통+데미지+장거리' },
@@ -4786,7 +5160,7 @@ function openShop() {
   grid.innerHTML = '';
   for (const item of SHOP_ITEMS) {
     const lv = player.getShopLevel(item.key);
-    const cost = item.cost(lv);
+    const cost = Math.floor(item.cost(lv));
     const maxed = lv >= item.max;
     const card = document.createElement('div');
     card.className = 'upgrade-card shop' + (maxed || player.btc < cost ? ' disabled' : '');
@@ -4807,7 +5181,7 @@ function openShop() {
 
 function buyShop(item) {
   const lv = player.getShopLevel(item.key);
-  const cost = item.cost(lv);
+  const cost = Math.floor(item.cost(lv));
   if (player.btc < cost) return;
   player.btc -= cost;
   if (item.action) item.action();
@@ -4862,6 +5236,7 @@ function pickLimitBreak(key) {
   
   // Continue to next phase
   STATE.phase++;
+  STATE.maxPhaseReached = Math.max(STATE.maxPhaseReached, STATE.phase);
   STATE.bossActive = false;
   STATE.bossDefeated = false;
   STATE.phaseStartTime = STATE.time;
@@ -5030,19 +5405,19 @@ function _spawnBossWarning(level) {
 
 let nextSpawnIn = 0;
 
-// 러쉬/휴식 페이즈 multiplier 계산
-// - 페이즈 시작 후 60~75초, 120~135초: 러쉬 (스폰 1.5배)
-// - 75~95초, 135~155초: 휴식 (스폰 0.5배 이하)
+// 러쉬/휴식 페이즈 multiplier 계산 (스테이지 길이 2분 기준으로 단축)
+// - 페이즈 시작 후 35~50초, 80~95초: 러쉬 (스폰 1.5배)
+// - 50~65초, 95~110초: 휴식 (스폰 0.5배 이하)
 // - 그 외: 평상시 (1.0배)
-// - 3분(180초) 이후엔 보스 트리거되므로 러쉬 없음
+// - 2분(120초) 이후엔 보스 트리거되므로 러쉬 없음
 function rushMultiplier() {
   const t = STATE.time - STATE.phaseStartTime;
-  if (t < 60) return 1.0;
-  if (t < 75) return 1.5;   // 러쉬 1
-  if (t < 95) return 0.5;   // 휴식 1
-  if (t < 120) return 1.0;
-  if (t < 135) return 1.5;  // 러쉬 2
-  if (t < 155) return 0.5;  // 휴식 2
+  if (t < 35) return 1.0;
+  if (t < 50) return 1.5;   // 러쉬 1
+  if (t < 65) return 0.5;   // 휴식 1
+  if (t < 80) return 1.0;
+  if (t < 95) return 1.5;   // 러쉬 2
+  if (t < 110) return 0.5;  // 휴식 2
   return 1.0;
 }
 
@@ -5054,16 +5429,21 @@ function spawnLogic(dt) {
   
   nextSpawnIn -= dt;
   if (nextSpawnIn <= 0) {
-    const cap = 8 + STATE.phase * 4;
+    // 동시 출현 캡: 페이즈가 올라갈수록 훨씬 많아짐
+    const cap = 12 + STATE.phase * 7;     // 8+phase*4 → 12+phase*7
     if (enemies.length < cap) {
       spawnEnemyOffscreen();
-      // 러쉬 중이면 추가로 더 등장 (50% 더 많이)
-      if (mult >= 1.5 && Math.random() < 0.5) spawnEnemyOffscreen();
-      // sometimes batch (페이즈 3 이상)
-      if (STATE.phase >= 3 && Math.random() < 0.3) spawnEnemyOffscreen();
+      // 페이즈 ≥ 2: 추가로 1마리 더 (확률)
+      if (STATE.phase >= 2 && Math.random() < 0.45) spawnEnemyOffscreen();
+      // 러쉬 중이면 추가로 더 등장
+      if (mult >= 1.5 && Math.random() < 0.7) spawnEnemyOffscreen();
+      // 페이즈 ≥ 3: 가끔 배치 스폰
+      if (STATE.phase >= 3 && Math.random() < 0.45) spawnEnemyOffscreen();
+      // 페이즈 ≥ 4: 더 자주 배치
+      if (STATE.phase >= 4 && Math.random() < 0.5) spawnEnemyOffscreen();
     }
-    // 다음 스폰까지 간격: 평상시 기준에서 mult 의 역수로 (러쉬일수록 자주, 휴식일수록 드물게)
-    const baseInterval = Math.max(0.4, 1.5 - STATE.phase * 0.15);
+    // 다음 스폰까지 간격: 페이즈 올라갈수록 짧아짐 (더 자주 스폰)
+    const baseInterval = Math.max(0.25, 1.4 - STATE.phase * 0.18);
     nextSpawnIn = baseInterval / mult;
   }
 }
@@ -5354,7 +5734,7 @@ function update(dt) {
   
   // Boss flow
   const phaseElapsed = STATE.time - STATE.phaseStartTime;
-  if (!STATE.bossActive && !STATE.bossDefeated && phaseElapsed > 180 && STATE.phase <= 5) {
+  if (!STATE.bossActive && !STATE.bossDefeated && phaseElapsed > 120 && STATE.phase <= 5) {
     spawnBoss();
   }
   // Cheat: also allow triggering boss faster — for now keep as is.
@@ -5572,6 +5952,11 @@ function startGame() {
   document.getElementById('bossWarning').style.display = 'none';
   STATE.gameOver = false;
   STATE.ended = false;
+  // 통계 초기화
+  STATE.kills = 0;
+  STATE.bossKills = 0;
+  STATE.totalEarned = 0;
+  STATE.maxPhaseReached = 1;
   // 튜토리얼/스토리/컷씬 플래그 초기화 (튜토리얼 완료 후 startGame 재호출 대응)
   STATE.inTutorial = false;
   STATE.tutorialStep = 0;
@@ -6252,5 +6637,502 @@ update = function(dt) {
 // startGame 보강: 튜토리얼 종료 후 호출되면 인트로 알림 띄우고 시작
 // =============================================================
 // (인자 fromTutorial 은 startGame 원본은 모르지만, 일단 그냥 무시해도 동작 OK)
+
+// =============================================================
+// 점수 / 랭킹 시스템 (게임오버, 엔딩, 타이틀 화면)
+// =============================================================
+// 점수 산식:
+//   • 잡몹 처치        : 30 / kill
+//   • 보스 처치        : 5000 / boss
+//   • 도달 페이즈      : 2000 × (phase - 1)
+//   • 누적 획득 BTC    : 2 × totalEarned
+//   • 생존 시간        : 10 × seconds
+//   • 클리어 보너스    : ended 면 +20000
+//   • 노데스 보너스    : 목숨이 처음 그대로면 +5000
+//
+// 등급 (S/A/B/C/D) 는 총점 기준
+// 좌측: 전대 랭킹 기록 (localStorage 에 최대 10개), 우측: 현재 결과
+// 타이틀 화면에도 좌측에 랭킹 표시
+
+// =====================
+// localStorage 랭킹 저장소
+// =====================
+const RANKING_KEY = 'shotgunKatanaRanking_v1';
+const RANKING_MAX_ENTRIES = 10;
+
+function loadRanking() {
+  try {
+    const raw = localStorage.getItem(RANKING_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr;
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveRankingEntry(entry) {
+  try {
+    const list = loadRanking();
+    list.push(entry);
+    list.sort((a, b) => b.total - a.total);
+    const trimmed = list.slice(0, RANKING_MAX_ENTRIES);
+    localStorage.setItem(RANKING_KEY, JSON.stringify(trimmed));
+    return trimmed;
+  } catch (e) {
+    return [];
+  }
+}
+
+// =====================
+// 점수 계산
+// =====================
+function computeFinalScore() {
+  const survivedSec = Math.floor(STATE.time);
+  const kills = STATE.kills || 0;
+  const bossKills = STATE.bossKills || 0;
+  const earned = STATE.totalEarned || 0;
+  const phase = STATE.maxPhaseReached || 1;
+  const lives = (player && player.lives) || 0;
+  const maxLives = (player && player.maxLives) || 3;
+  
+  const breakdown = {
+    kills:      kills * 30,
+    bossKills:  bossKills * 5000,
+    phase:      Math.max(0, (phase - 1)) * 2000,
+    earned:     earned * 2,
+    survival:   survivedSec * 10,
+    clearBonus: STATE.ended ? 20000 : 0,
+    noDeath:    (!STATE.gameOver && lives === maxLives) ? 5000 : 0,
+  };
+  const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+  
+  let rank = 'D';
+  if (total >= 80000) rank = 'S';
+  else if (total >= 50000) rank = 'A';
+  else if (total >= 25000) rank = 'B';
+  else if (total >= 10000) rank = 'C';
+  
+  return {
+    survivedSec, kills, bossKills, earned, phase,
+    breakdown, total, rank,
+    cleared: STATE.ended,
+    date: new Date().toISOString(),
+  };
+}
+
+const RANK_COLORS = {
+  'S': '#ffcc00',
+  'A': '#ff8800',
+  'B': '#00d4ff',
+  'C': '#88aa88',
+  'D': '#888',
+};
+
+function fmtNum(n) { return Number(n).toLocaleString(); }
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+// =====================
+// 현재 결과 (우측) 패널 HTML
+// =====================
+function buildResultPanelHTML(result) {
+  const rankColor = RANK_COLORS[result.rank] || '#fff';
+  const b = result.breakdown;
+  const rows = [
+    ['처치 수',     `${result.kills}`,           `+${fmtNum(b.kills)}`],
+    ['보스 처치',   `${result.bossKills}`,       `+${fmtNum(b.bossKills)}`],
+    ['도달 페이즈', `${result.phase}`,           `+${fmtNum(b.phase)}`],
+    ['누적 획득',   `₿ ${fmtNum(result.earned)}`,`+${fmtNum(b.earned)}`],
+    ['생존 시간',   fmtTime(result.survivedSec), `+${fmtNum(b.survival)}`],
+  ];
+  if (b.clearBonus > 0) rows.push(['클리어 보너스', '★', `+${fmtNum(b.clearBonus)}`]);
+  if (b.noDeath > 0)    rows.push(['NO DEATH', '♥♥♥', `+${fmtNum(b.noDeath)}`]);
+  
+  let rowsHTML = '';
+  for (const [label, val, pts] of rows) {
+    rowsHTML += `
+      <div class="score-row">
+        <span class="score-label">${label}</span>
+        <span class="score-value">${val}</span>
+        <span class="score-points">${pts}</span>
+      </div>`;
+  }
+  
+  return `
+    <div class="result-panel">
+      <div class="panel-header">결과</div>
+      <div class="score-rank" style="color:${rankColor}; text-shadow: 0 0 20px ${rankColor};">${result.rank}</div>
+      <div class="score-rank-label">RANK</div>
+      <div class="score-rows">${rowsHTML}</div>
+      <div class="score-total">
+        <span class="score-total-label">TOTAL</span>
+        <span class="score-total-value">${fmtNum(result.total)}</span>
+      </div>
+    </div>
+  `;
+}
+
+// =====================
+// 전대 랭킹 (좌측) 패널 HTML
+// highlightIdx: 방금 추가된 엔트리 인덱스 (강조)
+// =====================
+function buildRankingPanelHTML(ranking, highlightIdx) {
+  if (!ranking || ranking.length === 0) {
+    return `
+      <div class="ranking-panel">
+        <div class="panel-header">전대 랭킹</div>
+        <div class="ranking-empty">아직 기록이 없습니다.</div>
+      </div>
+    `;
+  }
+  
+  let rowsHTML = '';
+  for (let i = 0; i < ranking.length; i++) {
+    const r = ranking[i];
+    const rankColor = RANK_COLORS[r.rank] || '#fff';
+    const cls = (i === highlightIdx) ? 'rank-row highlight' : 'rank-row';
+    const cleared = r.cleared ? ' <span class="cleared-mark">★</span>' : '';
+    rowsHTML += `
+      <div class="${cls}">
+        <span class="rank-pos">${i + 1}</span>
+        <span class="rank-grade" style="color:${rankColor};">${r.rank}</span>
+        <span class="rank-stats">
+          <span class="rank-total">${fmtNum(r.total)}</span>
+          <span class="rank-meta">P${r.phase} · ${fmtTime(r.survivedSec)} · K${r.kills}${cleared}</span>
+        </span>
+      </div>`;
+  }
+  
+  return `
+    <div class="ranking-panel">
+      <div class="panel-header">전대 랭킹 TOP ${ranking.length}</div>
+      <div class="ranking-list">${rowsHTML}</div>
+    </div>
+  `;
+}
+
+// =====================
+// CSS 주입 (한 번만)
+// =====================
+function ensureScoreboardCSS() {
+  if (document.getElementById('scoreboardStyle')) return;
+  const style = document.createElement('style');
+  style.id = 'scoreboardStyle';
+  style.textContent = `
+    .scoreboard-wrap {
+      display: flex;
+      gap: 24px;
+      justify-content: center;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      margin: 20px auto;
+      max-width: 1100px;
+      padding: 0 12px;
+      box-sizing: border-box;
+    }
+    .ranking-panel, .result-panel {
+      flex: 1 1 360px;
+      min-width: 320px;
+      max-width: 480px;
+      padding: 22px 26px;
+      background: rgba(0,0,0,0.72);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 4px;
+      color: #eee;
+      letter-spacing: 0.5px;
+      box-sizing: border-box;
+      box-shadow: 0 0 24px rgba(0,0,0,0.5);
+      backdrop-filter: blur(2px);
+    }
+    .panel-header {
+      font-size: 12px;
+      letter-spacing: 6px;
+      color: #888;
+      text-align: center;
+      margin-bottom: 14px;
+      text-transform: uppercase;
+    }
+    /* 결과 패널 */
+    .score-rank {
+      text-align: center;
+      font-size: 88px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: -2px;
+    }
+    .score-rank-label {
+      text-align: center;
+      font-size: 12px;
+      color: #888;
+      letter-spacing: 6px;
+      margin-bottom: 16px;
+    }
+    .score-rows {
+      border-top: 1px solid rgba(255,255,255,0.08);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      padding: 8px 0;
+    }
+    .score-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 16px;
+      padding: 6px 4px;
+      font-size: 14px;
+      align-items: baseline;
+    }
+    .score-label  { color: #999; }
+    .score-value  { color: #fff; font-weight: 600; min-width: 60px; text-align: right; }
+    .score-points { color: #ffcc00; font-weight: 700; min-width: 80px; text-align: right; }
+    .score-total {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-top: 14px;
+      padding-top: 4px;
+    }
+    .score-total-label {
+      font-size: 13px;
+      color: #888;
+      letter-spacing: 4px;
+    }
+    .score-total-value {
+      font-size: 30px;
+      font-weight: 900;
+      color: #ffcc00;
+      text-shadow: 0 0 16px rgba(255,204,0,0.6);
+    }
+    /* 랭킹 패널 */
+    .ranking-empty {
+      color: #666;
+      text-align: center;
+      padding: 40px 0;
+      font-size: 13px;
+    }
+    .ranking-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .rank-row {
+      display: grid;
+      grid-template-columns: 36px 36px 1fr;
+      gap: 10px;
+      padding: 8px 6px;
+      align-items: center;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      font-size: 13px;
+    }
+    .rank-row.highlight {
+      background: rgba(255,204,0,0.10);
+      border: 1px solid rgba(255,204,0,0.5);
+      box-shadow: 0 0 12px rgba(255,204,0,0.25);
+    }
+    .rank-pos {
+      color: #777;
+      font-weight: 700;
+      text-align: right;
+    }
+    .rank-grade {
+      font-weight: 900;
+      font-size: 18px;
+      text-align: center;
+    }
+    .rank-stats {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .rank-total {
+      color: #ffcc00;
+      font-weight: 700;
+      font-size: 15px;
+    }
+    .rank-meta {
+      color: #888;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+    }
+    .cleared-mark {
+      color: #ffcc00;
+      margin-left: 4px;
+    }
+    /* 타이틀 화면 랭킹 (좌측, 작게) */
+    .title-ranking {
+      position: absolute;
+      left: 24px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 320px;
+      max-width: 32vw;
+      max-height: 72vh;
+      overflow-y: auto;
+      padding: 18px 20px;
+      background: rgba(0,0,0,0.72);
+      border: 1px solid rgba(255,204,0,0.25);
+      border-radius: 4px;
+      color: #eee;
+      /* titleScreen 의 ::before/::after (z 1, 2) 보다 위 */
+      z-index: 10;
+      pointer-events: auto;
+      box-shadow: 0 0 24px rgba(0,0,0,0.6);
+      backdrop-filter: blur(2px);
+    }
+    .title-ranking .panel-header {
+      color: #ffcc00;
+      margin-bottom: 10px;
+    }
+    .title-ranking .rank-row { font-size: 12px; padding: 6px 4px; }
+    .title-ranking .rank-grade { font-size: 16px; }
+    .title-ranking .rank-total { font-size: 13px; }
+    @media (max-width: 900px) {
+      .title-ranking { display: none; }
+      .scoreboard-wrap { flex-direction: column; align-items: center; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+// =====================
+// 게임오버 / 엔딩 화면 점수판 삽입
+// =====================
+let _scoreSavedThisRun = false;  // 같은 죽음에서 두 번 저장 방지
+function resetScoreSaveFlag() { _scoreSavedThisRun = false; }
+
+function injectScoreboard(screenId) {
+  ensureScoreboardCSS();
+  const screen = document.getElementById(screenId);
+  if (!screen) return;
+  
+  const result = computeFinalScore();
+  
+  // 랭킹 저장 (같은 런 1회만)
+  let ranking;
+  let highlightIdx = -1;
+  if (!_scoreSavedThisRun) {
+    _scoreSavedThisRun = true;
+    ranking = saveRankingEntry({
+      rank: result.rank,
+      total: result.total,
+      kills: result.kills,
+      bossKills: result.bossKills,
+      earned: result.earned,
+      phase: result.phase,
+      survivedSec: result.survivedSec,
+      cleared: result.cleared,
+      date: result.date,
+    });
+    // 방금 저장된 항목의 위치 찾기 (date 일치)
+    highlightIdx = ranking.findIndex(r => r.date === result.date);
+  } else {
+    ranking = loadRanking();
+  }
+  
+  // (게임오버/엔딩 이미지는 HTML 의 풀스크린 배경 <img> 로 처리됨 — JS 동적 삽입 불필요)
+  
+  // 기존 점수판 wrapper 있으면 제거 후 재삽입
+  const old = screen.querySelector('.scoreboard-wrap');
+  if (old) old.remove();
+  
+  const wrap = document.createElement('div');
+  wrap.className = 'scoreboard-wrap';
+  wrap.innerHTML =
+    buildRankingPanelHTML(ranking, highlightIdx) +
+    buildResultPanelHTML(result);
+  
+  // 재시작 버튼 후보를 찾아 그 앞에 끼워넣음
+  const btn = screen.querySelector('button, .btn, [data-restart], [data-action]');
+  if (btn && btn.parentElement) {
+    btn.parentElement.insertBefore(wrap, btn);
+  } else {
+    const inner = screen.querySelector('.modal, .content, .panel, .inner') || screen;
+    inner.appendChild(wrap);
+  }
+}
+
+// =====================
+// 게임오버 / 엔딩 화면 표시 후킹
+// =====================
+(function hookEndScreens() {
+  function tryHook() {
+    const goEl = document.getElementById('gameOverScreen');
+    const endEl = document.getElementById('endingScreen');
+    if (!goEl && !endEl) {
+      setTimeout(tryHook, 200);
+      return;
+    }
+    if (goEl) {
+      const obs = new MutationObserver(() => {
+        if (goEl.classList.contains('show')) injectScoreboard('gameOverScreen');
+        else { /* 화면 숨겨질 때 */ }
+      });
+      obs.observe(goEl, { attributes: true, attributeFilter: ['class'] });
+    }
+    if (endEl) {
+      const obs2 = new MutationObserver(() => {
+        if (endEl.classList.contains('show')) injectScoreboard('endingScreen');
+      });
+      obs2.observe(endEl, { attributes: true, attributeFilter: ['class'] });
+    }
+  }
+  tryHook();
+})();
+
+// =====================
+// 타이틀 화면 랭킹 표시
+// =====================
+function renderTitleRanking() {
+  ensureScoreboardCSS();
+  const titleScreen = document.getElementById('titleScreen');
+  if (!titleScreen) return;
+  
+  // 기존 패널 갱신/생성
+  let panel = titleScreen.querySelector('.title-ranking');
+  const ranking = loadRanking();
+  
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'title-ranking';
+    titleScreen.appendChild(panel);
+  }
+  // 랭킹 패널 빌드 (highlight 없음) — 빈 배열이어도 buildRankingPanelHTML 이
+  // "아직 기록이 없습니다" 메시지를 보여줌
+  panel.innerHTML = buildRankingPanelHTML(ranking, -1);
+}
+
+// 타이틀 화면 표시 시점에 랭킹 갱신
+(function hookTitleRanking() {
+  function tryHook() {
+    const titleEl = document.getElementById('titleScreen');
+    if (!titleEl) {
+      setTimeout(tryHook, 200);
+      return;
+    }
+    // 초기 렌더 (페이지 로드 시 타이틀이 이미 떠 있음)
+    renderTitleRanking();
+    // 타이틀이 다시 표시될 때(예: display none → block)도 갱신
+    const obs = new MutationObserver(() => {
+      const visible = (titleEl.style.display !== 'none')
+        && !titleEl.classList.contains('hidden');
+      if (visible) renderTitleRanking();
+    });
+    obs.observe(titleEl, { attributes: true, attributeFilter: ['style', 'class'] });
+  }
+  tryHook();
+})();
+
+// 게임 시작/재시작 시 점수 저장 플래그 리셋
+const _origStartGameForScore = (typeof startGame === 'function') ? startGame : null;
+if (_origStartGameForScore) {
+  // eslint-disable-next-line no-func-assign
+  startGame = function(...args) {
+    resetScoreSaveFlag();
+    return _origStartGameForScore.apply(this, args);
+  };
+}
 
 requestAnimationFrame(gameLoop);
