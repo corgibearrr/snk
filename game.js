@@ -1257,7 +1257,7 @@ class Player {
     
     // idle/walk 시 살짝 위아래 보브
     let bobY = 0;
-    if (drawState === 'idle') bobY = Math.sin(this.animTime * 4) * 1.5;
+    if (drawState === 'idle') bobY = Math.sin(this.animTime * 4) * 0;
     else if (drawState === 'walk') bobY = Math.abs(Math.sin(this.animTime * 14)) * -2;
     
     // 부활 직후 무적: 깜빡거림 효과
@@ -4832,13 +4832,13 @@ let drone = null;
 // 이미지가 그보다 작으면(=단일 프레임 이미지면) 자동으로 1프레임으로 fallback.
 
 const ANIMATIONS = {
-  idle:  { src: 'images/player_idle.png',  frameW: 128, frameH: 128, frameCount: 1, fps: 4,  loop: true  },
+  idle:  { src: 'images/player_idle.png',  frameW: 128, frameH: 128, frameCount: 4, fps: 4,  loop: true  },
   walk:  { src: 'images/player_move.png',  frameW: 128, frameH: 128, frameCount: 4, fps: 8,  loop: true  },
-  shoot: { src: 'images/player_shoot.png', frameW: 128, frameH: 128, frameCount: 1, fps: 16, loop: false },
-  slash: { src: 'images/player_slash.png', frameW: 128, frameH: 128, frameCount: 1, fps: 14, loop: false },
+  shoot: { src: 'images/player_shoot.png', frameW: 128, frameH: 128, frameCount: 4, fps: 16, loop: false },
+  slash: { src: 'images/player_slash.png', frameW: 128, frameH: 128, frameCount: 4, fps: 14, loop: false },
   // 슬라이딩(구르기) 전용 이미지 — 파일이 없으면 자동으로 walk 로 폴백
   // 한 장이거나 가로로 N프레임 스프라이트시트로 만들면 됨.
-  slide: { src: 'images/player_slide.png', frameW: 128, frameH: 128, frameCount: 1, fps: 12, loop: false },
+  slide: { src: 'images/player_slide.png', frameW: 128, frameH: 128, frameCount: 4, fps: 12, loop: false },
 };
 
 // =============================================================
