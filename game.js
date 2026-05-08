@@ -56,6 +56,9 @@ const STATE = {
   bossKills: 0,         // 보스 처치 수
   totalEarned: 0,       // 누적 획득 BTC (소비해도 깎이지 않음)
   maxPhaseReached: 1,   // 도달한 최고 페이즈
+  // === 보스 진입/처치 시 임시 처리 ===
+  bossInvulnTimer: 0,   // 보스 등장/처치 시 플레이어 임시 무적 (초)
+  spawnFrozen: false,   // 페이즈 후반(2분 경과) — 더 이상 적 리젠 안 함, 남은 적 처치 시 보스 등장
 };
 
 const KEYS = {};
@@ -197,6 +200,14 @@ const SFX_FILES = {
   'death': 'sounds/death.mp3',
   'pickup': 'sounds/pickup.mp3',
   'explode': 'sounds/explode.mp3',
+  // 신규 효과음 (파일이 없으면 자동으로 절차생성 폴백)
+  'parry':         'sounds/parry.mp3',         // 패링 (총알 반사)
+  'slide':         'sounds/slide.mp3',         // 슬라이딩(구르기)
+  'enemyShoot':    'sounds/enemy_shoot.mp3',   // 적이 총을 쏠 때
+  'snipeAim':      'sounds/snipe_aim.mp3',     // 저격수/리퍼 조준 시작
+  'cracksonCharge':'sounds/crackson_charge.mp3', // 크랙슨 돌진 발동
+  'bombardAim':    'sounds/bombard_aim.mp3',   // 포격 조준 시작
+  'playerDown':    'sounds/player_down.mp3',   // 플레이어 다운(게임오버)
 };
 const SFX_VOLUME = 1;
 
@@ -331,6 +342,142 @@ function sfx(type) {
     const g = audioCtx.createGain();
     g.gain.value = 0.8;
     src.connect(filter); filter.connect(g); g.connect(sfxGain);
+    src.start();
+  } else if (type === 'parry') {
+    // 패링: 짧고 청량한 메탈릭 'ting' + 약간의 노이즈 임팩트
+    const o1 = audioCtx.createOscillator();
+    o1.type = 'triangle';
+    o1.frequency.setValueAtTime(2400, t);
+    o1.frequency.exponentialRampToValueAtTime(900, t + 0.18);
+    const g1 = audioCtx.createGain();
+    g1.gain.setValueAtTime(0.5, t);
+    g1.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+    o1.connect(g1); g1.connect(sfxGain);
+    o1.start(); o1.stop(t + 0.22);
+    // 노이즈 임팩트 (짧게)
+    const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.06, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / data.length * 12);
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    const hp = audioCtx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 1500;
+    const g2 = audioCtx.createGain();
+    g2.gain.value = 0.35;
+    src.connect(hp); hp.connect(g2); g2.connect(sfxGain);
+    src.start();
+  } else if (type === 'slide') {
+    // 슬라이딩: 화이트노이즈 'shhh' + 빠른 페이드아웃
+    const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.35, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      const env = Math.exp(-i / data.length * 3.5);
+      data[i] = (Math.random() * 2 - 1) * env;
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    const bp = audioCtx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 1800;
+    bp.Q.value = 0.7;
+    const g = audioCtx.createGain();
+    g.gain.value = 0.3;
+    src.connect(bp); bp.connect(g); g.connect(sfxGain);
+    src.start();
+  } else if (type === 'enemyShoot') {
+    // 적의 사격: shoot 보다 약간 어두운 톤 (구분되도록)
+    const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.12, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / data.length * 10);
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 800;
+    const g = audioCtx.createGain();
+    g.gain.value = 0.4;
+    src.connect(filter); filter.connect(g); g.connect(sfxGain);
+    src.start();
+  } else if (type === 'snipeAim') {
+    // 저격수 조준: 짧은 레이저 차징 톤 (상승)
+    const o = audioCtx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(420, t);
+    o.frequency.exponentialRampToValueAtTime(1100, t + 0.45);
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.18, t + 0.05);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+    o.connect(g); g.connect(sfxGain);
+    o.start(); o.stop(t + 0.5);
+  } else if (type === 'cracksonCharge') {
+    // 크랙슨 돌진: 무거운 저음 임팩트 + 노이즈
+    const o = audioCtx.createOscillator();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(120, t);
+    o.frequency.exponentialRampToValueAtTime(40, t + 0.4);
+    const g1 = audioCtx.createGain();
+    g1.gain.setValueAtTime(0.45, t);
+    g1.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
+    o.connect(g1); g1.connect(sfxGain);
+    o.start(); o.stop(t + 0.45);
+    // 추가 노이즈 럼블
+    const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.4, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / data.length * 4);
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    const lp = audioCtx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 300;
+    const g2 = audioCtx.createGain();
+    g2.gain.value = 0.5;
+    src.connect(lp); lp.connect(g2); g2.connect(sfxGain);
+    src.start();
+  } else if (type === 'bombardAim') {
+    // 포격 조준: 위협적인 알람 톤 (아래로 떨어지는 음)
+    const o = audioCtx.createOscillator();
+    o.type = 'square';
+    o.frequency.setValueAtTime(880, t);
+    o.frequency.exponentialRampToValueAtTime(220, t + 0.35);
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.22, t + 0.04);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    o.connect(g); g.connect(sfxGain);
+    o.start(); o.stop(t + 0.4);
+  } else if (type === 'playerDown') {
+    // 플레이어 다운: 길고 어두운 'fall' 사운드 + 노이즈
+    const o = audioCtx.createOscillator();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(300, t);
+    o.frequency.exponentialRampToValueAtTime(40, t + 1.0);
+    const g1 = audioCtx.createGain();
+    g1.gain.setValueAtTime(0.45, t);
+    g1.gain.exponentialRampToValueAtTime(0.001, t + 1.2);
+    o.connect(g1); g1.connect(sfxGain);
+    o.start(); o.stop(t + 1.2);
+    // 임팩트 노이즈
+    const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.6, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / data.length * 5);
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    const lp = audioCtx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 500;
+    const g2 = audioCtx.createGain();
+    g2.gain.value = 0.5;
+    src.connect(lp); lp.connect(g2); g2.connect(sfxGain);
     src.start();
   }
 }
@@ -523,7 +670,7 @@ class Player {
     // Battery
     this.batteryMax = 100;
     this.battery = 100;
-    this.batteryRegen = 12; // per sec (기존 12에서 30% 감소)
+    this.batteryRegen = 9; // per sec (기존 12에서 30% 감소)
     this.batteryRegenDelay = 0;  // 배터리 소모 직후 재생 정지 시간 (초)
     
     // 목숨 시스템 (3목숨)
@@ -737,7 +884,7 @@ class Player {
         this.battery -= this.rollCost;
         this.batteryRegenDelay = 1.0;  // 구르기 후 1초 재생 정지
         this.rollDir = {x: mx, y: my};
-        sfx('charge');
+        sfx('slide');
         
         // Run & Gun
         if (this.hasUpgrade('runAndGun')) {
@@ -805,10 +952,15 @@ class Player {
     const ax = Math.cos(this.angle);
     this.facingLeft = ax < 0;
     
-    // 우선순위: slide(rolling) > slash > shoot > walk > idle
-    // slide 이미지가 없으면 자연스럽게 walk 로 폴백 (draw 단계에서)
+    // 우선순위: down(gameOver) > slide(rolling) > slash > shoot > walk > idle
+    // slide/down 이미지가 없으면 자연스럽게 폴백 (draw 단계에서)
     let nextState;
-    if (this.rolling) {
+    if (STATE.gameOver) {
+      const downImg = ANIM_IMAGES['down'];
+      const downOk = downImg && downImg.complete && downImg.naturalWidth > 0;
+      nextState = downOk ? 'down' : 'idle';
+    }
+    else if (this.rolling) {
       const slideImg = ANIM_IMAGES['slide'];
       const slideOk = slideImg && slideImg.complete && slideImg.naturalWidth > 0;
       nextState = slideOk ? 'slide' : 'walk';
@@ -1122,6 +1274,7 @@ class Player {
       // 진짜 게임 오버
       STATE.gameOver = true;
       sfx('death');
+      sfx('playerDown');
       STATE.shake = 60;
       STATE.hitstop = 200;
       
@@ -1205,9 +1358,15 @@ class Player {
     }
     
     // Try to draw animated sprite
-    // 현재 상태 결정 (rolling 은 slide 우선, 없으면 walk 로 폴백)
+    // 현재 상태 결정 (gameOver > rolling > slash > shoot > walk > idle)
     let drawState;
-    if (this.rolling) {
+    if (STATE.gameOver) {
+      // 다운 이미지가 로드돼 있으면 down, 아니면 idle 로 폴백
+      const downImg = ANIM_IMAGES['down'];
+      const downOk = downImg && downImg.complete && downImg.naturalWidth > 0;
+      drawState = downOk ? 'down' : 'idle';
+    }
+    else if (this.rolling) {
       // slide 이미지가 로드돼 있으면 slide, 아니면 walk
       const slideImg = ANIM_IMAGES['slide'];
       const slideOk = slideImg && slideImg.complete && slideImg.naturalWidth > 0;
@@ -1807,6 +1966,7 @@ class Enemy {
             const jitter = rand(-0.06, 0.06);
             const a = targetAngle + jitter;
             enemyBullets.push(new EnemyBullet(this.x, this.y, Math.cos(a) * sp, Math.sin(a) * sp, {color: '#ff8030', r: 12}));
+            sfx('enemyShoot');
           }
           this.burstLeft--;
           this.burstTimer = this.burstInterval;
@@ -1828,6 +1988,7 @@ class Enemy {
           if (this.isOnScreen()) {
             const sp = 840;
             enemyBullets.push(new EnemyBullet(this.x, this.y, Math.cos(targetAngle) * sp, Math.sin(targetAngle) * sp, {color: '#ff8030', r: 12}));
+            sfx('enemyShoot');
           }
           this.burstLeft = 2;          // 추가 2발 (총 3발)
           this.burstTimer = this.burstInterval;
@@ -1866,6 +2027,7 @@ class Enemy {
           const a = this.angle + i * spread / 4;
           enemyBullets.push(new EnemyBullet(this.x, this.y, Math.cos(a) * sp, Math.sin(a) * sp, {color: '#cccccc'}));
         }
+        sfx('enemyShoot');
         this.cooldown = this.attackCd;
       }
     } else if (this.type === 'assassin') {
@@ -1946,11 +2108,13 @@ class Enemy {
           // fire fast bullet
           const sp = 2700;
           enemyBullets.push(new EnemyBullet(this.x, this.y, Math.cos(this.aimAngle) * sp, Math.sin(this.aimAngle) * sp, {color: '#ffff00', r: 8, fast: true}));
+          sfx('enemyShoot');
           this.cooldown = 3;
           this.aimLine = null;
         }
       } else if (this.cooldown <= 0 && d > 200) {
         this.aiming = this.aimTime;
+        sfx('snipeAim');
       }
     }
     
@@ -2439,6 +2603,16 @@ class Boss extends Enemy {
     STATE.shake = 60;
     STATE.hitstop = 250;
     STATE.bossDefeated = true;
+    
+    // 보스 처치 직후: 필드의 모든 투사체 제거 + 플레이어 임시 무적
+    enemyBullets = [];
+    bullets = [];
+    // 진행 중이던 포격 등 적 효과도 제거 (단, 방금 만든 Explosion 은 보존)
+    const justSpawnedExplosion = effects[effects.length - 1];
+    effects = effects.filter(e => !(e instanceof Bombardment));
+    // 플레이어 임시 무적 (2.5초)
+    if (player) player.invulnTime = Math.max(player.invulnTime, 2.5);
+    STATE.bossInvulnTimer = 2.5;
   }
   
   update(dt) {
@@ -2630,7 +2804,7 @@ class Boss extends Enemy {
             this.tripleDashTimer = 0.3;   // 짧은 돌진 시간 (속도 20% 감소했으므로 시간 살짝 늘려 비슷한 거리)
             this.tripleDashState = 'dashing';
             // 발동 사운드
-            sfx('charge');
+            sfx('cracksonCharge');
             STATE.shake = Math.max(STATE.shake, 14);
           }
         } else if (this.tripleDashState === 'dashing') {
@@ -2720,7 +2894,7 @@ class Boss extends Enemy {
           // 돌격 시작
           this.charging = true;
           this.chargingPrep = 0;
-          sfx('charge');
+          sfx('cracksonCharge');
         }
       } else if (this.charging) {
         // 매우 빠른 돌격 — 저격수 탄속(2700)에 가까운 속도로 돌진
@@ -2832,7 +3006,7 @@ class Boss extends Enemy {
               const a = Math.random() * TAU;
               particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(80, 200), Math.sin(a) * rand(80, 200), 0.4, '#ff6060', 5));
             }
-            sfx('charge');
+            sfx('cracksonCharge');
           } else if (this.cooldown <= 0 && d < 675 && this.isOnScreen()) {
             // 돌격 준비 시작 — 1초 정지 후 발사
             this.chargingPrep = 1.0;
@@ -2936,15 +3110,30 @@ class Boss extends Enemy {
         }
       }
       
-      if (d < 200 && this.teleportCd <= 0) {
-        // teleport away
-        const a = angleTo(player, this) + rand(-0.5, 0.5);
-        this.x += Math.cos(a) * 500;
-        this.y += Math.sin(a) * 500;
-        for (let i = 0; i < 30; i++) {
-          particles.push(new Particle(this.x, this.y, rand(-200, 200), rand(-200, 200), 0.5, '#a020f0', 6));
+      // 플레이어가 가까이 접근하면 — 텔레포트 대신 슬라이딩으로 회피
+      // (슬라이딩 쿨에 묶이며, teleportCd 도 함께 보호로 사용)
+      if (d < 200 && this.slidingCd <= 0 && this.slidingTime <= 0) {
+        // 플레이어 반대 방향으로 슬라이딩
+        const awayAngle = angleTo(player, this);   // 플레이어 → 리퍼 방향 = 도주 방향
+        // 살짝 무작위 각도 첨가
+        const slideAng = awayAngle + rand(-0.4, 0.4);
+        this.slidingDir = { x: Math.cos(slideAng), y: Math.sin(slideAng) };
+        this.slidingTime = 0.4;
+        this.slidingCd = 5.0;   // 슬라이딩 쿨다운 (다른 슬라이딩 트리거와 동일)
+        this.teleportCd = Math.max(this.teleportCd, 1.0);  // 짧은 보조 쿨
+        // 시작 효과 — 보라색/흰색 파티클
+        for (let i = 0; i < 16; i++) {
+          const a = Math.random() * TAU;
+          particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(80, 220), Math.sin(a) * rand(80, 220), 0.5, '#ffffff', 6));
         }
-        this.teleportCd = 5;
+        for (let i = 0; i < 12; i++) {
+          const a = Math.random() * TAU;
+          particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(60, 180), Math.sin(a) * rand(60, 180), 0.4, '#a020f0', 5));
+        }
+        // 조준 중이면 취소
+        if (this.aiming > 0) { this.aiming = 0; this.aimLine = null; }
+        sfx('slide');
+        return;  // 슬라이딩 시작 즉시 다른 행동 X
       }
       
       // Slow drift
@@ -2954,6 +3143,8 @@ class Boss extends Enemy {
       // 리퍼는 무한 사거리 — 화면 밖이든 맵 끝이든 조준 가능
       // 카타나 패링이 없으면 살아남기 어려운 강도로 사격
       // + 플레이어 움직임 예측 (lead aiming): 발사 후 도달 시점의 위치를 겨냥
+      // + 조준선이 즉시 따라잡지 않고 매 프레임 일정 속도로 회전 (추적 방식)
+      //   - 플레이어가 슬라이딩 중이면 더 빠르게 따라잡음 (일반보다 약 2.2배)
       if (this.aiming > 0) {
         this.aiming -= dt;
         // 예측 사격: 거의 완벽한 lead — 패링 없이는 회피 어려움
@@ -2963,18 +3154,40 @@ class Boss extends Enemy {
         const leadFactor = 0.95;   // 0.7 → 0.95 (강한 예측)
         const predX = player.x + player.vx * travelT * leadFactor;
         const predY = player.y + player.vy * travelT * leadFactor;
-        this.aimAngle = Math.atan2(predY - this.y, predX - this.x);
+        const targetAimAngle = Math.atan2(predY - this.y, predX - this.x);
+        
+        // 현재 aimAngle 에서 targetAimAngle 까지 일정 각속도로 회전 (즉시 점프 X)
+        // - 일반: 5.0 rad/s (≈ 286도/초)
+        // - 플레이어 슬라이딩 중: 11.0 rad/s (약 2.2배 — 빠르게 따라잡음)
+        // - 차징 후반에는 추가 가속 (조준 정확도 보정)
+        const trackingSpeed = (player.rolling ? 11.0 : 5.0)
+          + (1 - this.aiming / 1.2) * 4.0;   // 차징 진행도에 따라 +0~4
+        let diff = targetAimAngle - this.aimAngle;
+        while (diff > Math.PI) diff -= TAU;
+        while (diff < -Math.PI) diff += TAU;
+        const maxStep = trackingSpeed * dt;
+        if (Math.abs(diff) <= maxStep) {
+          this.aimAngle = targetAimAngle;
+        } else {
+          this.aimAngle += Math.sign(diff) * maxStep;
+        }
+        
         // 레이저 길이 — 맵 끝까지 충분히 길게 (장애물 무관)
         this.aimLine = { angle: this.aimAngle, length: 9000 };
         if (this.aiming <= 0) {
           // 발사 — 조준선 방향 그대로
           const b = new EnemyBullet(this.x, this.y, Math.cos(this.aimAngle) * sp, Math.sin(this.aimAngle) * sp, {color: '#ff00ff', r: 12, fast: true, piercing: true, life: 8});
           enemyBullets.push(b);
+          sfx('enemyShoot');
           this.cooldown = 1.5;
           this.aimLine = null;
         }
       } else if (this.cooldown <= 0) {
         this.aiming = 1.2;
+        sfx('snipeAim');
+        // 조준 시작 시점의 aimAngle 을 현재 플레이어 방향으로 초기화 (한 번만)
+        // — 아니면 이전 사격 직후 angle 이 남아있어 이상한 방향에서 추적 시작
+        this.aimAngle = targetAngle;
       }
     } else if (this.level === 4) { // CP-09
       this.angle = targetAngle;
@@ -4584,6 +4797,12 @@ class SlashEffect {
         eb.damage = Math.max(eb.damage, parryDmgs[Math.min(this.stage, 3)]);
         this.reflectedBullets.add(eb);
         
+        // 패링 사운드 (한 슬래시당 첫 반사에서만 재생해서 사운드 폭주 방지)
+        if (!this._parrySoundPlayed) {
+          sfx('parry');
+          this._parrySoundPlayed = true;
+        }
+        
         STATE.hitstop = Math.max(STATE.hitstop, 140);    // 80 → 140
         STATE.shake = Math.max(STATE.shake, 10);         // 22 → 10
         
@@ -4667,6 +4886,8 @@ class Bombardment {
     this.exploded = false;
     this.dead = false;
     this.afterTime = 0.5;
+    // 포격 조준(경고) 사운드 — 즉시 재생
+    sfx('bombardAim');
   }
   update(dt) {
     if (!this.exploded) {
@@ -4839,6 +5060,8 @@ const ANIMATIONS = {
   // 슬라이딩(구르기) 전용 이미지 — 파일이 없으면 자동으로 walk 로 폴백
   // 한 장이거나 가로로 N프레임 스프라이트시트로 만들면 됨.
   slide: { src: 'images/player_slide.png', frameW: 128, frameH: 128, frameCount: 4, fps: 12, loop: false },
+  // 다운(게임오버) 전용 이미지 — 파일이 없으면 자동으로 idle 로 폴백
+  down:  { src: 'images/player_down.png',  frameW: 128, frameH: 128, frameCount: 1, fps: 1,  loop: false },
 };
 
 // =============================================================
@@ -5240,6 +5463,7 @@ function pickLimitBreak(key) {
   STATE.bossActive = false;
   STATE.bossDefeated = false;
   STATE.phaseStartTime = STATE.time;
+  STATE.spawnFrozen = false;   // 새 페이즈 시작 — 적 리젠 재개
   bossEntity = null;
 }
 
@@ -5398,6 +5622,15 @@ function _spawnBossWarning(level) {
       bx = clamp(bx, 100, WORLD.w - 100);
       by = clamp(by, 100, WORLD.h - 100);
       bossEntity = new Boss(bx, by, level);
+      
+      // 보스 등장 시: 필드의 모든 투사체 제거 + 플레이어 임시 무적
+      enemyBullets = [];
+      bullets = [];
+      // 진행 중이던 포격(Bombardment) 등 적 효과도 제거
+      effects = effects.filter(e => !(e instanceof Bombardment));
+      // 플레이어 임시 무적 (2.5초)
+      if (player) player.invulnTime = Math.max(player.invulnTime, 2.5);
+      STATE.bossInvulnTimer = 2.5;
     }
     STATE.bossWarning = false;
   }, 2500);
@@ -5424,6 +5657,13 @@ function rushMultiplier() {
 function spawnLogic(dt) {
   if (STATE.bossActive) return;
   if (STATE.inLimitBreak) return;
+  
+  // 페이즈 시작 후 2분 경과 시 더 이상 스폰 안 함 (남은 적 처치 후 보스 등장)
+  const phaseElapsed = STATE.time - STATE.phaseStartTime;
+  if (phaseElapsed > 120) {
+    STATE.spawnFrozen = true;
+    return;
+  }
   
   const mult = rushMultiplier();
   
@@ -5673,6 +5913,9 @@ function gameLoop(now) {
 }
 
 function update(dt) {
+  // 보스 등장/처치 시 임시 무적 카운트다운 (player.invulnTime 과 별개로 시각 효과용 추적)
+  if (STATE.bossInvulnTimer > 0) STATE.bossInvulnTimer = Math.max(0, STATE.bossInvulnTimer - dt);
+  
   if (player) player.update(dt);
   if (drone) drone.update(dt);
   
@@ -5733,8 +5976,10 @@ function update(dt) {
   holograms = holograms.filter(h => !h.dead);
   
   // Boss flow
+  // 2분이 지난 뒤(STATE.spawnFrozen=true) + 남은 적이 모두 처치된 뒤 보스 등장
   const phaseElapsed = STATE.time - STATE.phaseStartTime;
-  if (!STATE.bossActive && !STATE.bossDefeated && phaseElapsed > 120 && STATE.phase <= 5) {
+  if (!STATE.bossActive && !STATE.bossDefeated && STATE.phase <= 5 &&
+      phaseElapsed > 120 && enemies.length === 0) {
     spawnBoss();
   }
   // Cheat: also allow triggering boss faster — for now keep as is.
@@ -5949,6 +6194,8 @@ function startGame() {
   STATE.bossActive = false;
   STATE.bossWarning = false;
   STATE.bossDefeated = false;
+  STATE.spawnFrozen = false;
+  STATE.bossInvulnTimer = 0;
   document.getElementById('bossWarning').style.display = 'none';
   STATE.gameOver = false;
   STATE.ended = false;
@@ -6377,6 +6624,8 @@ function startTutorial() {
   STATE.bossActive = true;       // 자동 보스 스폰 차단
   STATE.bossWarning = false;
   STATE.bossDefeated = false;
+  STATE.spawnFrozen = false;
+  STATE.bossInvulnTimer = 0;
   STATE.gameOver = false;
   STATE.ended = false;
   STATE.inTutorial = true;
