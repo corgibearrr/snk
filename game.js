@@ -523,7 +523,7 @@ class Player {
     // Battery
     this.batteryMax = 100;
     this.battery = 100;
-    this.batteryRegen = 9; // per sec (기존 12에서 30% 감소)
+    this.batteryRegen = 12; // per sec (기존 12에서 30% 감소)
     this.batteryRegenDelay = 0;  // 배터리 소모 직후 재생 정지 시간 (초)
     
     // 목숨 시스템 (3목숨)
