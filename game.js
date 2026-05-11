@@ -649,6 +649,50 @@ let pickups = [];
 let obstacles = [];
 let effects = [];        // visual effects (slash arcs, explosions)
 let damageNumbers = [];
+let damageNumberBuckets = new Map();
+let nextDamageNumberTargetId = 1;
+
+function getDamageNumberTargetId(target) {
+  if (!target) return null;
+  if (!target._damageNumberTargetId) target._damageNumberTargetId = nextDamageNumberTargetId++;
+  return target._damageNumberTargetId;
+}
+
+function damageNumberColor(value) {
+  if (value < 3) return '#ffffff';
+  if (value < 8) return '#ffe45c';
+  if (value < 16) return '#ff9f1c';
+  if (value < 32) return '#ff3048';
+  return '#c040ff';
+}
+
+function queueDamageNumber(target, value, yOffset) {
+  if (!target || value <= 0) return;
+  const id = getDamageNumberTargetId(target);
+  if (!id) return;
+  const bucket = damageNumberBuckets.get(id) || { target, value: 0, timer: 0.1, yOffset };
+  bucket.target = target;
+  bucket.value += value;
+  bucket.timer = 0.1;
+  bucket.yOffset = yOffset;
+  damageNumberBuckets.set(id, bucket);
+}
+
+function flushDamageNumberBucket(bucket) {
+  if (!bucket || bucket.value <= 0 || !bucket.target) return;
+  const yOffset = bucket.yOffset !== undefined ? bucket.yOffset : -35;
+  damageNumbers.push(new DmgNumber(bucket.target.x, bucket.target.y + yOffset, bucket.value));
+}
+
+function updateDamageNumberBuckets(dt) {
+  for (const [id, bucket] of damageNumberBuckets) {
+    bucket.timer -= dt;
+    if (bucket.timer <= 0 || bucket.target.dead) {
+      flushDamageNumberBucket(bucket);
+      damageNumberBuckets.delete(id);
+    }
+  }
+}
 let bloodstains = [];    // 샷건 처치 시 남는 핏자국 (오래 지속)
 let respawnQueue = [];   // 파괴된 장애물 리스폰 큐 ({x, y, w, h, explosive, timer})
 let holograms = [];      // 리스폰 직전 표시되는 푸른 홀로그램
@@ -672,6 +716,11 @@ class Player {
     this.battery = 100;
     this.batteryRegen = 9; // per sec (기존 12에서 30% 감소)
     this.batteryRegenDelay = 0;  // 배터리 소모 직후 재생 정지 시간 (초)
+    
+    // Time dilation energy (seconds): Shift slow-mo uses this, not battery.
+    this.slowMoMax = 3;
+    this.slowMoEnergy = this.slowMoMax;
+    this.slowMoRegen = 0.3;
     
     // 목숨 시스템 (3목숨)
     this.lives = 3;
@@ -833,16 +882,16 @@ class Player {
       if (KEYS['d']) mx += 1;
       const len = Math.hypot(mx, my);
       if (len > 0) { mx /= len; my /= len; }
-      
-      // 쉬프트 = 시간 슬로우 (불릿타임)
-      // - 적/총알/효과만 느려지고 플레이어는 정상속도로 움직임
-      // - 배터리 빠르게 소모 (계속 누르고 있으면 금방 바닥)
-      // - 배터리가 0 이상일 때만 작동, 0 도달 시 자동 해제
-      // - 화면에 사이버펑크 시안 톤 + 캐릭터 잔상 효과
-      const slowMoCostPerSec = 25;       // 초당 배터리 25 소모 (스프린트보다 훨씬 빠름)
+      // Shift = 시간 감속. 배터리 대신 별도 시간 에너지를 사용한다.
       const slowKey = KEYS['shift'] || KEYS['Shift'] || KEYS['ShiftLeft'] || KEYS['ShiftRight'];
-      const isSlowMo = slowKey && this.battery > 0 && !STATE.paused;
+      const isSlowMo = slowKey && this.slowMoEnergy > 0 && !STATE.paused;
       STATE.slowMo = isSlowMo;
+      
+      if (isSlowMo) {
+        this.slowMoEnergy = Math.max(0, this.slowMoEnergy - dt);
+      } else {
+        this.slowMoEnergy = Math.min(this.slowMoMax, this.slowMoEnergy + this.slowMoRegen * dt);
+      }
       
       // 슬로우모 중엔 플레이어 이동 50% 가속 (적/총알이 느려진 상태에서 더 민첩하게)
       const moveMult = isSlowMo ? 1.5 : 1.0;
@@ -850,9 +899,6 @@ class Player {
       this.y += my * this.speed * dt * moveMult;
       
       if (isSlowMo) {
-        this.battery = Math.max(0, this.battery - slowMoCostPerSec * dt);
-        // 슬로우모션 종료 직후 회복 잠시 정지
-        this.batteryRegenDelay = Math.max(this.batteryRegenDelay, 0.5);
         // 잔상 프레임 매우 자주 생성 — 불릿타임 느낌
         this.trailSpawnTimer -= dt;
         if (this.trailSpawnTimer <= 0) {
@@ -1209,8 +1255,24 @@ class Player {
     MOUSE.rightHoldTime = 0;
   }
   
-  takeDamage() {
+  triggerGraze() {
+    if (typeof this.grazeBoost !== 'number') this.grazeBoost = 0;
+    this.grazeBoost = Math.min(2.0, this.grazeBoost + 0.6);
+    this.battery = Math.min(this.batteryMax * (1 + 0.2 * (this.upgrades['ionSlot'] || 0)), this.battery + 4);
+    this.batteryRegenDelay = 0;
+    for (let i = 0; i < 3; i++) {
+      const a = Math.random() * TAU;
+      particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(40, 100), Math.sin(a) * rand(40, 100), 0.25, '#00d4ff', 3));
+    }
+  }
+  
+  takeDamage(source) {
     if (this.rolling) return;
+    if (source === 'bullet' && STATE.slowMo) {
+      this.triggerGraze();
+      damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#00d4ff', 'GRAZE'));
+      return;
+    }
     if (STATE.gameOver) return;
     if (this.invulnTime > 0) return;  // 부활 직후 무적
     
@@ -1474,6 +1536,26 @@ class Player {
       ctx.shadowBlur = 0;
     }
     
+    // Time dilation energy bar under player
+    if (!STATE.gameOver) {
+      const bw = 76;
+      const bh = 1;
+      const bx = s.x - bw / 2;
+      const by = s.y + 64;
+      const ratio = clamp(this.slowMoEnergy / this.slowMoMax, 0, 1);
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.72)';
+      ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
+      ctx.fillStyle = '#00f5ff';
+      ctx.shadowBlur = STATE.slowMo ? 14 : 7;
+      ctx.shadowColor = '#00f5ff';
+      ctx.fillRect(bx, by, bw * ratio, bh);
+      ctx.strokeStyle = 'rgba(180,255,255,0.9)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx - 0.5, by - 0.5, bw + 1, bh + 1);
+      ctx.restore();
+    }
+    
     // Battery low warning
     if (this.battery < 15) {
       const alpha = (Math.sin(this.warningPulse) + 1) / 2;
@@ -1615,9 +1697,9 @@ class Bullet {
       
       if (dist(this, en) < effectiveR + this.r) {
         const wasAlive = !en.dead;
-        en.takeDamage(this.damage, 'bullet');
+        const hitSource = player.hasUpgrade('piercing') ? 'piercingBullet' : 'bullet';
+        en.takeDamage(this.damage, hitSource);
         if (player.hasUpgrade('emp')) en.stunTimer = 0.4;
-        damageNumbers.push(new DmgNumber(en.x, en.y - 30, this.damage, '#ffcc00'));
         // 샷건 처치 시 핏자국 (지속)
         if (wasAlive && en.dead) {
           bloodstains.push(new BloodStain(en.x, en.y, en.r));
@@ -1638,9 +1720,9 @@ class Bullet {
         bossEffR = bossEntity.weakSpotOffset + bossEntity.weakSpotR;
       }
       if (!this.pierced.includes(bossEntity) && dist(this, bossEntity) < bossEffR + this.r) {
-        bossEntity.takeDamage(this.damage);
+        const hitSource = player.hasUpgrade('piercing') ? 'piercingBullet' : 'bullet';
+        bossEntity.takeDamage(this.damage, hitSource);
         if (player.hasUpgrade('emp')) bossEntity.slowTimer = 0.5;
-        damageNumbers.push(new DmgNumber(bossEntity.x, bossEntity.y - 50, this.damage, '#ffcc00'));
         if (player.hasUpgrade('piercing') && Math.random() < 0.5) {
           this.pierced.push(bossEntity);
         } else {
@@ -1729,7 +1811,7 @@ class EnemyBullet {
         const dPB = dist(this, player);
         // 실제 피격 판정 — 이미지보다 작은 hitR 사용
         if (dPB < player.hitR + this.r) {
-          player.takeDamage();
+          player.takeDamage('bullet');
           this.dead = true;
           return;
         }
@@ -1737,18 +1819,7 @@ class EnemyBullet {
         // 한 번만 트리거 (this.grazed 플래그)
         if (!this.grazed && dPB < player.grazeR + this.r) {
           this.grazed = true;
-          // 배터리 가속 충전 + 잠시 강한 재생
-          if (typeof player.grazeBoost !== 'number') player.grazeBoost = 0;
-          player.grazeBoost = Math.min(2.0, player.grazeBoost + 0.6);  // 최대 2초까지 누적
-          // 즉시 약간 충전
-          player.battery = Math.min(player.batteryMax * (1 + 0.2 * (player.upgrades['ionSlot'] || 0)), player.battery + 4);
-          // 배터리 재생 딜레이 즉시 해제
-          player.batteryRegenDelay = 0;
-          // 시각/사운드 피드백 — 작은 시안 잔상
-          for (let i = 0; i < 3; i++) {
-            const a = Math.random() * TAU;
-            particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(40, 100), Math.sin(a) * rand(40, 100), 0.25, '#00d4ff', 3));
-          }
+          player.triggerGraze();
           damageNumbers.push(new DmgNumber(player.x, player.y - 50, 0, '#00d4ff', 'GRAZE'));
         }
       }
@@ -1864,6 +1935,7 @@ class Enemy {
       return;
     }
     
+    const piercesDefense = source === 'piercingBullet';
     // 방패병: 카타나(슬래시)는 방패를 못 뚫음 — 정면 방어 시 차단
     if (this.type === 'shielder' && this.shieldHp > 0 && source === 'slash') {
       // 방패가 플레이어를 향하고 있으면(즉 정면 방어) 차단
@@ -1880,10 +1952,11 @@ class Enemy {
     }
     
     this.hp -= d;
+    queueDamageNumber(this, d, -40);
     this.hitFlash = 0.1;
     sfx('hit');
     
-    if (this.type === 'shielder' && this.shieldHp > 0) {
+    if (this.type === 'shielder' && this.shieldHp > 0 && !piercesDefense) {
       this.shieldHp -= d;
       if (this.shieldHp <= 0) {
         // shield breaks, particles
@@ -2459,7 +2532,7 @@ class Boss extends Enemy {
     };
   }
   
-  takeDamage(d) {
+  takeDamage(d, source) {
     if (this.dead) return;
     // 경계면 밖에 있을 때는 무적 — 단, 리퍼(level 3)는 무한 사거리 사격하므로 패링 반격을 위해 예외
     if (this.level !== 3 && !this.isOnScreen()) return;
@@ -2503,7 +2576,7 @@ class Boss extends Enemy {
     
     // 크랙슨 방패: 진행 방향(this.angle) 정면 ±90도면 완전 무적
     // → 후면을 노리거나 돌격 후 스턴 상태에서 공격해야 함
-    if (this.level === 2) {
+    if (this.level === 2 && source !== 'piercingBullet') {
       const playerAngle = angleTo(this, player);
       let diff = playerAngle - this.angle;
       while (diff > Math.PI) diff -= TAU;
@@ -2518,6 +2591,7 @@ class Boss extends Enemy {
     }
     
     this.hp -= d;
+    queueDamageNumber(this, d, -50);
     this.hitFlash = 0.1;
     sfx('hit');
     if (this.hp <= 0) {
@@ -3151,7 +3225,7 @@ class Boss extends Enemy {
         // 총알 속도 5600, 거리 d, 도달 시간 t ≈ d / 5600
         const sp = 5600;
         const travelT = d / sp;
-        const leadFactor = 0.95;   // 0.7 → 0.95 (강한 예측)
+        const leadFactor = 0.75;   // 0.7 → 0.95 (강한 예측)
         const predX = player.x + player.vx * travelT * leadFactor;
         const predY = player.y + player.vy * travelT * leadFactor;
         const targetAimAngle = Math.atan2(predY - this.y, predX - this.x);
@@ -3160,8 +3234,8 @@ class Boss extends Enemy {
         // - 일반: 5.0 rad/s (≈ 286도/초)
         // - 플레이어 슬라이딩 중: 11.0 rad/s (약 2.2배 — 빠르게 따라잡음)
         // - 차징 후반에는 추가 가속 (조준 정확도 보정)
-        const trackingSpeed = (player.rolling ? 11.0 : 5.0)
-          + (1 - this.aiming / 1.2) * 4.0;   // 차징 진행도에 따라 +0~4
+        const trackingSpeed = (player.rolling ? 6.0 : 2.5)
+          + (1 - this.aiming / 1.2) * 2.0;   // 차징 진행도에 따라 +0~4
         let diff = targetAimAngle - this.aimAngle;
         while (diff > Math.PI) diff -= TAU;
         while (diff < -Math.PI) diff += TAU;
@@ -4139,10 +4213,14 @@ class Particle {
 class DmgNumber {
   constructor(x, y, value, color, text) {
     this.x = x; this.y = y;
-    this.text = text || (value > 0 ? `-${value}` : (value === 0 ? '0' : `+${-value}`));
-    this.color = color;
-    this.life = 0.8; this.life0 = 0.8;
-    this.dy = -40;
+    const shown = value > 0 ? Math.round(value * 10) / 10 : value;
+    this.text = text || (value > 0 ? `-${shown}` : (value === 0 ? '0' : `+${-value}`));
+    this.value = Math.max(0, value || 0);
+    this.color = color || damageNumberColor(this.value);
+    this.fontSize = text ? 18 : clamp(20 + Math.sqrt(this.value) * 5, 20, 56);
+    this.life = text ? 0.8 : 0.95;
+    this.life0 = this.life;
+    this.dy = text ? -40 : -55;
     this.dead = false;
   }
   update(dt) {
@@ -4157,10 +4235,13 @@ class DmgNumber {
     ctx.save();
     ctx.globalAlpha = a;
     ctx.fillStyle = this.color;
-    ctx.shadowBlur = 6;
+    ctx.shadowBlur = this.value > 0 ? 12 : 6;
     ctx.shadowColor = this.color;
-    ctx.font = 'bold 14px Bebas Neue';
+    ctx.font = `bold ${this.fontSize}px Bebas Neue`;
     ctx.textAlign = 'center';
+    ctx.lineWidth = Math.max(3, this.fontSize * 0.12);
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.strokeText(this.text, s.x, s.y);
     ctx.fillText(this.text, s.x, s.y);
     ctx.restore();
   }
@@ -5944,6 +6025,7 @@ function update(dt) {
   for (const p of particles) p.update(dt);                // 파티클은 정상속도 유지 (시각 효과)
   for (const pk of pickups) pk.update(dt);                // 픽업도 정상속도 (플레이어와 상호작용)
   for (const e of effects) e.update(enemyDt);             // 폭격/충격파 등 적 효과는 슬로우
+  updateDamageNumberBuckets(dt);
   for (const dn of damageNumbers) dn.update(dt);
   for (const bs of bloodstains) bs.update(dt);
   for (const h of holograms) h.update(dt);
@@ -6179,6 +6261,7 @@ function startGame() {
   pickups = [];
   effects = [];
   damageNumbers = [];
+  damageNumberBuckets = new Map();
   bloodstains = [];
   obstacles = [];
   respawnQueue = [];
@@ -6586,8 +6669,8 @@ const TUTORIAL_STEPS = [
     check: (s) => s.rolls >= 1,
   },
   {
-    title: '시간 슬로우 / 배터리',
-    text: 'SHIFT를 누르면 적과 총알이 느려진다.\n배터리는 모든 능력의 근원이니 잘 관리할 것.',
+    title: '시간 감속',
+    text: 'SHIFT를 누르면 시간 감속 에너지를 써서 적과 총알이 느려진다.\n감속 중 총알에 맞으면 죽지 않고 GRAZE 처리된다.',
     progress: '8 / 8',
     check: (s) => s.slowMoUsed >= 1,
   },
@@ -6609,6 +6692,7 @@ function startTutorial() {
   pickups = [];
   effects = [];
   damageNumbers = [];
+  damageNumberBuckets = new Map();
   bloodstains = [];
   obstacles = [];
   respawnQueue = [];
@@ -6790,7 +6874,7 @@ const BOSS_CUTSCENES = {
   ],
   // 페이즈 3: 리퍼
   3: [
-    { side: 'right', name: '???', text: '...너, 참진리연구회지.', portrait: 'images/boss3_reaper.png' },
+    { side: 'right', name: '리퍼', text: '...너, 참진리연구회지.', portrait: 'images/boss3_reaper.png' },
     { side: 'left',  name: '사마엘', text: '샘플 내놔.', portrait: 'images/standing.png' },
     { side: 'right', name: '리퍼', text: '진리를 독점하려는 네놈들의 수작은 끝났다.', portrait: 'images/boss3_reaper.png' },
     { side: 'right', name: '리퍼', text: '샘플은 이미 다른 곳으로 옮겼어.\n네가 와봐야 늦었다는 뜻이지.', portrait: 'images/boss3_reaper.png' },
@@ -6907,7 +6991,127 @@ update = function(dt) {
 // localStorage 랭킹 저장소
 // =====================
 const RANKING_KEY = 'shotgunKatanaRanking_v1';
+const RANKING_NAME_KEY = 'shotgunKatanaPlayerName_v1';
 const RANKING_MAX_ENTRIES = 10;
+const SUPABASE_URL = 'https://ptpqqpjducalfdvevota.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_ZShTNM3ZXPwYUKQVrgacag_VmNJk4_6';
+const SUPABASE_RANKING_TABLE = 'sk_rankings';
+const SUPABASE_RANKING_ENABLED = true;
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[ch]);
+}
+
+function normalizePlayerName(name) {
+  const cleaned = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 16);
+  return cleaned || 'PLAYER';
+}
+
+function getPlayerName() {
+  try {
+    const saved = normalizePlayerName(localStorage.getItem(RANKING_NAME_KEY));
+    if (saved && saved !== 'PLAYER') return saved;
+    const typed = prompt('랭킹에 올릴 닉네임을 입력하세요', saved || 'PLAYER');
+    const name = normalizePlayerName(typed);
+    localStorage.setItem(RANKING_NAME_KEY, name);
+    return name;
+  } catch (e) {
+    return 'PLAYER';
+  }
+}
+
+function toSupabaseRankingEntry(entry) {
+  return {
+    player_name: entry.playerName || 'PLAYER',
+    rank: entry.rank,
+    total: entry.total,
+    kills: entry.kills,
+    boss_kills: entry.bossKills,
+    earned: entry.earned,
+    phase: entry.phase,
+    survived_sec: entry.survivedSec,
+    cleared: !!entry.cleared,
+    client_run_id: entry.clientRunId || entry.date,
+    created_at: entry.date,
+  };
+}
+
+function fromSupabaseRankingEntry(row) {
+  return {
+    playerName: row.player_name || 'PLAYER',
+    rank: row.rank,
+    total: row.total || 0,
+    kills: row.kills || 0,
+    bossKills: row.boss_kills || 0,
+    earned: row.earned || 0,
+    phase: row.phase || 1,
+    survivedSec: row.survived_sec || 0,
+    cleared: !!row.cleared,
+    date: row.created_at || new Date().toISOString(),
+    clientRunId: row.client_run_id || '',
+    remote: true,
+  };
+}
+
+async function fetchServerRanking() {
+  if (!SUPABASE_RANKING_ENABLED || typeof fetch !== 'function') return null;
+  const url = new URL(`${SUPABASE_URL}/rest/v1/${SUPABASE_RANKING_TABLE}`);
+  url.searchParams.set('select', 'player_name,rank,total,kills,boss_kills,earned,phase,survived_sec,cleared,created_at,client_run_id');
+  url.searchParams.set('order', 'total.desc,survived_sec.desc,created_at.asc');
+  url.searchParams.set('limit', String(RANKING_MAX_ENTRIES));
+  const res = await fetch(url.toString(), {
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+    },
+  });
+  if (!res.ok) throw new Error(`ranking fetch failed: ${res.status}`);
+  const rows = await res.json();
+  return Array.isArray(rows) ? rows.map(fromSupabaseRankingEntry) : [];
+}
+
+async function saveServerRankingEntry(entry) {
+  if (!SUPABASE_RANKING_ENABLED || typeof fetch !== 'function') return null;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_RANKING_TABLE}`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=representation',
+    },
+    body: JSON.stringify(toSupabaseRankingEntry(entry)),
+  });
+  if (!res.ok) throw new Error(`ranking save failed: ${res.status}`);
+  return fetchServerRanking();
+}
+
+async function loadRankingOnline() {
+  try {
+    const serverRanking = await fetchServerRanking();
+    if (serverRanking) return { ranking: serverRanking, source: 'server' };
+  } catch (e) {
+    console.warn('[ranking] server load failed, using local ranking', e);
+  }
+  return { ranking: loadRanking(), source: 'local' };
+}
+
+async function saveRankingEntryOnline(entry) {
+  const localRanking = saveRankingEntry(entry);
+  try {
+    const serverRanking = await saveServerRankingEntry(entry);
+    if (serverRanking) return { ranking: serverRanking, source: 'server' };
+  } catch (e) {
+    console.warn('[ranking] server save failed, using local ranking', e);
+  }
+  return { ranking: localRanking, source: 'local' };
+}
 
 function loadRanking() {
   try {
@@ -7046,12 +7250,13 @@ function buildRankingPanelHTML(ranking, highlightIdx) {
     const rankColor = RANK_COLORS[r.rank] || '#fff';
     const cls = (i === highlightIdx) ? 'rank-row highlight' : 'rank-row';
     const cleared = r.cleared ? ' <span class="cleared-mark">★</span>' : '';
+    const playerName = escapeHTML(r.playerName || 'PLAYER');
     rowsHTML += `
       <div class="${cls}">
         <span class="rank-pos">${i + 1}</span>
         <span class="rank-grade" style="color:${rankColor};">${r.rank}</span>
         <span class="rank-stats">
-          <span class="rank-total">${fmtNum(r.total)}</span>
+          <span class="rank-total">${fmtNum(r.total)} <span class="rank-name">${playerName}</span></span>
           <span class="rank-meta">P${r.phase} · ${fmtTime(r.survivedSec)} · K${r.kills}${cleared}</span>
         </span>
       </div>`;
@@ -7201,6 +7406,20 @@ function ensureScoreboardCSS() {
       font-weight: 700;
       font-size: 15px;
     }
+    .rank-name {
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      margin-left: 6px;
+      letter-spacing: 0.5px;
+    }
+    .ranking-source {
+      margin-top: 10px;
+      text-align: center;
+      font-size: 11px;
+      color: #777;
+      letter-spacing: 2px;
+    }
     .rank-meta {
       color: #888;
       font-size: 11px;
@@ -7252,19 +7471,38 @@ function ensureScoreboardCSS() {
 let _scoreSavedThisRun = false;  // 같은 죽음에서 두 번 저장 방지
 function resetScoreSaveFlag() { _scoreSavedThisRun = false; }
 
-function injectScoreboard(screenId) {
+async function injectScoreboard(screenId) {
   ensureScoreboardCSS();
   const screen = document.getElementById(screenId);
   if (!screen) return;
   
   const result = computeFinalScore();
+  const old = screen.querySelector('.scoreboard-wrap');
+  if (old) old.remove();
+  
+  const wrap = document.createElement('div');
+  wrap.className = 'scoreboard-wrap';
+  wrap.innerHTML =
+    buildRankingPanelHTML([], -1) +
+    buildResultPanelHTML(result);
+  
+  const btn = screen.querySelector('button, .btn, [data-restart], [data-action]');
+  if (btn && btn.parentElement) {
+    btn.parentElement.insertBefore(wrap, btn);
+  } else {
+    const inner = screen.querySelector('.modal, .content, .panel, .inner') || screen;
+    inner.appendChild(wrap);
+  }
   
   // 랭킹 저장 (같은 런 1회만)
-  let ranking;
+  let rankingResult;
   let highlightIdx = -1;
   if (!_scoreSavedThisRun) {
     _scoreSavedThisRun = true;
-    ranking = saveRankingEntry({
+    result.playerName = getPlayerName();
+    result.clientRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    rankingResult = await saveRankingEntryOnline({
+      playerName: result.playerName,
       rank: result.rank,
       total: result.total,
       kills: result.kills,
@@ -7274,32 +7512,20 @@ function injectScoreboard(screenId) {
       survivedSec: result.survivedSec,
       cleared: result.cleared,
       date: result.date,
+      clientRunId: result.clientRunId,
     });
-    // 방금 저장된 항목의 위치 찾기 (date 일치)
-    highlightIdx = ranking.findIndex(r => r.date === result.date);
+    highlightIdx = rankingResult.ranking.findIndex(r => r.clientRunId === result.clientRunId || r.date === result.date);
   } else {
-    ranking = loadRanking();
+    rankingResult = await loadRankingOnline();
   }
   
-  // (게임오버/엔딩 이미지는 HTML 의 풀스크린 배경 <img> 로 처리됨 — JS 동적 삽입 불필요)
-  
-  // 기존 점수판 wrapper 있으면 제거 후 재삽입
-  const old = screen.querySelector('.scoreboard-wrap');
-  if (old) old.remove();
-  
-  const wrap = document.createElement('div');
-  wrap.className = 'scoreboard-wrap';
   wrap.innerHTML =
-    buildRankingPanelHTML(ranking, highlightIdx) +
+    buildRankingPanelHTML(rankingResult.ranking, highlightIdx) +
     buildResultPanelHTML(result);
-  
-  // 재시작 버튼 후보를 찾아 그 앞에 끼워넣음
-  const btn = screen.querySelector('button, .btn, [data-restart], [data-action]');
-  if (btn && btn.parentElement) {
-    btn.parentElement.insertBefore(wrap, btn);
-  } else {
-    const inner = screen.querySelector('.modal, .content, .panel, .inner') || screen;
-    inner.appendChild(wrap);
+  const panel = wrap.querySelector('.ranking-panel');
+  if (panel) {
+    const source = rankingResult.source === 'server' ? 'ONLINE RANKING' : 'LOCAL RANKING';
+    panel.insertAdjacentHTML('beforeend', `<div class="ranking-source">${source}</div>`);
   }
 }
 
@@ -7334,23 +7560,24 @@ function injectScoreboard(screenId) {
 // =====================
 // 타이틀 화면 랭킹 표시
 // =====================
-function renderTitleRanking() {
+async function renderTitleRanking() {
   ensureScoreboardCSS();
   const titleScreen = document.getElementById('titleScreen');
   if (!titleScreen) return;
   
   // 기존 패널 갱신/생성
   let panel = titleScreen.querySelector('.title-ranking');
-  const ranking = loadRanking();
   
   if (!panel) {
     panel = document.createElement('div');
     panel.className = 'title-ranking';
     titleScreen.appendChild(panel);
   }
-  // 랭킹 패널 빌드 (highlight 없음) — 빈 배열이어도 buildRankingPanelHTML 이
-  // "아직 기록이 없습니다" 메시지를 보여줌
-  panel.innerHTML = buildRankingPanelHTML(ranking, -1);
+  panel.innerHTML = buildRankingPanelHTML([], -1);
+  const rankingResult = await loadRankingOnline();
+  panel.innerHTML = buildRankingPanelHTML(rankingResult.ranking, -1);
+  const source = rankingResult.source === 'server' ? 'ONLINE RANKING' : 'LOCAL RANKING';
+  panel.insertAdjacentHTML('beforeend', `<div class="ranking-source">${source}</div>`);
 }
 
 // 타이틀 화면 표시 시점에 랭킹 갱신
