@@ -196,6 +196,46 @@
     box-shadow: 0 0 50px rgba(0,200,255,1);
   }
   
+  .difficulty-select {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    margin: 0 auto 18px;
+    flex-wrap: wrap;
+    max-width: 620px;
+  }
+  
+  .difficulty-btn {
+    min-width: 132px;
+    padding: 9px 12px;
+    border: 2px solid rgba(255,255,255,0.45);
+    background: rgba(0,0,0,0.56);
+    color: #bbb;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 18px;
+    letter-spacing: 2px;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  
+  .difficulty-btn:hover,
+  .difficulty-btn.selected {
+    color: #fff;
+    border-color: #ffcc00;
+    background: rgba(255,204,0,0.14);
+    box-shadow: 0 0 18px rgba(255,204,0,0.3);
+  }
+  
+  .difficulty-btn[data-difficulty="hero"].selected {
+    border-color: #00d4ff;
+    box-shadow: 0 0 18px rgba(0,212,255,0.35);
+  }
+  
+  .difficulty-btn[data-difficulty="dystopia"].selected {
+    border-color: #ff2050;
+    box-shadow: 0 0 18px rgba(255,32,80,0.4);
+  }
+  
   .credit {
     position: absolute;
     bottom: 20px;
@@ -954,6 +994,11 @@
       <div id="titleTextFallback" style="display:none;">
         <h1>SHOTGUN<span class="amp">&amp;</span>KATANA</h1>
         <div class="subtitle">샷건 &amp; 카타나</div>
+      </div>
+      <div class="difficulty-select" aria-label="난이도 선택">
+        <button class="difficulty-btn" type="button" data-difficulty="hero">주인공</button>
+        <button class="difficulty-btn selected" type="button" data-difficulty="normal">보통</button>
+        <button class="difficulty-btn" type="button" data-difficulty="dystopia">디스토피아</button>
       </div>
       <button class="menu-btn" id="tutorialBtn">TUTORIAL</button>
       <br>

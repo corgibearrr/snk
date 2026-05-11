@@ -59,7 +59,55 @@ const STATE = {
   // === 보스 진입/처치 시 임시 처리 ===
   bossInvulnTimer: 0,   // 보스 등장/처치 시 플레이어 임시 무적 (초)
   spawnFrozen: false,   // 페이즈 후반(2분 경과) — 더 이상 적 리젠 안 함, 남은 적 처치 시 보스 등장
+  difficulty: 'normal',
 };
+
+const DIFFICULTY_SETTINGS = {
+  hero: {
+    label: 'Hero',
+    batteryRegenMult: 1.6,
+    rollCostMult: 0.5,
+    grazeSlowMoSeconds: 1.0,
+    enemySpeedMult: 1.0,
+    enemyAttackCdMult: 1.35,
+    enemyAimTimeMult: 1.25,
+    enemyTelegraphMult: 1.1,
+    bossTimeScale: 1.0,
+  },
+  normal: {
+    label: 'Normal',
+    batteryRegenMult: 1.0,
+    rollCostMult: 1.0,
+    grazeSlowMoSeconds: 0,
+    enemySpeedMult: 1.0,
+    enemyAttackCdMult: 1.0,
+    enemyAimTimeMult: 1.0,
+    enemyTelegraphMult: 1.0,
+    bossTimeScale: 1.0,
+  },
+  dystopia: {
+    label: 'Dystopia',
+    batteryRegenMult: 1.0,
+    rollCostMult: 1.0,
+    grazeSlowMoSeconds: 0,
+    enemySpeedMult: 1.25,
+    enemyAttackCdMult: 0.45,
+    enemyAimTimeMult: 0.35,
+    enemyTelegraphMult: 0.65,
+    bossTimeScale: 1.25,
+  },
+};
+
+function difficultyConfig() {
+  return DIFFICULTY_SETTINGS[STATE.difficulty] || DIFFICULTY_SETTINGS.normal;
+}
+
+function setDifficulty(key) {
+  STATE.difficulty = DIFFICULTY_SETTINGS[key] ? key : 'normal';
+  document.querySelectorAll('[data-difficulty]').forEach(btn => {
+    btn.classList.toggle('selected', btn.dataset.difficulty === STATE.difficulty);
+  });
+}
 
 const KEYS = {};
 const MOUSE = { x: W/2, y: H/2, worldX: 0, worldY: 0, leftDown: false, rightDown: false, leftHoldTime: 0, rightHoldTime: 0 };
@@ -721,6 +769,8 @@ class Player {
     this.slowMoMax = 3;
     this.slowMoEnergy = this.slowMoMax;
     this.slowMoRegen = 0.3;
+    this.slowMoCooldown = 0;
+    this.slowMoAutoTimer = 0;
     
     // 목숨 시스템 (3목숨)
     this.lives = 3;
@@ -773,7 +823,7 @@ class Player {
     
     // Animation
     this.animTime = 0;
-    this.animState = 'idle'; // idle, walk, shoot, slash
+    this.animState = 'idle'; // idle, walk, backwalk, shoot, slash
     this.shootAnimTime = 0;
     this.slashAnimTime = 0;
     this.warningPulse = 0;
@@ -818,6 +868,7 @@ class Player {
     if (this.upgrades['ionSlot']) batteryMaxEff *= (1 + 0.2 * this.upgrades['ionSlot']);
     let regenRate = this.batteryRegen;
     if (this.upgrades['ionCharger']) regenRate *= (1 + 0.2 * this.upgrades['ionCharger']);
+    regenRate *= difficultyConfig().batteryRegenMult;
     // 그레이즈 부스트 — 총알이 스쳐갔을 때 일정 시간 재생 가속(×3)
     if (typeof this.grazeBoost !== 'number') this.grazeBoost = 0;
     if (this.grazeBoost > 0) {
@@ -883,12 +934,20 @@ class Player {
       const len = Math.hypot(mx, my);
       if (len > 0) { mx /= len; my /= len; }
       // Shift = 시간 감속. 배터리 대신 별도 시간 에너지를 사용한다.
+      if (this.slowMoCooldown > 0) this.slowMoCooldown = Math.max(0, this.slowMoCooldown - dt);
+      if (this.slowMoAutoTimer > 0) this.slowMoAutoTimer = Math.max(0, this.slowMoAutoTimer - dt);
       const slowKey = KEYS['shift'] || KEYS['Shift'] || KEYS['ShiftLeft'] || KEYS['ShiftRight'];
-      const isSlowMo = slowKey && this.slowMoEnergy > 0 && !STATE.paused;
+      const wantsSlowMo = slowKey || this.slowMoAutoTimer > 0;
+      const isSlowMo = wantsSlowMo && this.slowMoCooldown <= 0 && this.slowMoEnergy > 0 && !STATE.paused;
       STATE.slowMo = isSlowMo;
       
       if (isSlowMo) {
         this.slowMoEnergy = Math.max(0, this.slowMoEnergy - dt);
+        if (this.slowMoEnergy <= 0) {
+          this.slowMoCooldown = 3.0;
+          this.slowMoAutoTimer = 0;
+          STATE.slowMo = false;
+        }
       } else {
         this.slowMoEnergy = Math.min(this.slowMoMax, this.slowMoEnergy + this.slowMoRegen * dt);
       }
@@ -920,14 +979,17 @@ class Player {
         }
       }
       
-      this.animState = (mx || my) ? 'walk' : 'idle';
+      const aimX = Math.cos(this.angle);
+      const backwalking = (mx < -0.1 && aimX > 0.15) || (mx > 0.1 && aimX < -0.15);
+      this.animState = (mx || my) ? (backwalking ? 'backwalk' : 'walk') : 'idle';
       
       // Roll trigger
-      if (KEYS[' '] && this.rollCooldown <= 0 && this.battery >= this.rollCost && (mx || my)) {
+      const rollCost = this.rollCost * difficultyConfig().rollCostMult;
+      if (KEYS[' '] && this.rollCooldown <= 0 && this.battery >= rollCost && (mx || my)) {
         this.rolling = true;
         this.rollTime = this.rollDuration * (this.hasUpgrade('slidingBoots') ? 1.2 : 1);
         this.rollCooldown = this.rollCdMax * (this.hasUpgrade('slidingBoots') ? 0.7 : 1);
-        this.battery -= this.rollCost;
+        this.battery -= rollCost;
         this.batteryRegenDelay = 1.0;  // 구르기 후 1초 재생 정지
         this.rollDir = {x: mx, y: my};
         sfx('slide');
@@ -1013,6 +1075,11 @@ class Player {
     }
     else if (this.slashAnimTime > 0) nextState = 'slash';
     else if (this.shootAnimTime > 0) nextState = 'shoot';
+    else if (this.animState === 'backwalk') {
+      const backImg = ANIM_IMAGES['backwalk'];
+      const backOk = backImg && backImg.complete && backImg.naturalWidth > 0;
+      nextState = backOk ? 'backwalk' : 'walk';
+    }
     else if (this.animState === 'walk') nextState = 'walk';
     else nextState = 'idle';
     this.anim.setState(nextState);
@@ -1256,6 +1323,10 @@ class Player {
   }
   
   triggerGraze() {
+    const autoSlow = difficultyConfig().grazeSlowMoSeconds || 0;
+    if (autoSlow > 0 && this.slowMoCooldown <= 0 && this.slowMoEnergy > 0) {
+      this.slowMoAutoTimer = Math.max(this.slowMoAutoTimer, autoSlow);
+    }
     if (typeof this.grazeBoost !== 'number') this.grazeBoost = 0;
     this.grazeBoost = Math.min(2.0, this.grazeBoost + 0.6);
     this.battery = Math.min(this.batteryMax * (1 + 0.2 * (this.upgrades['ionSlot'] || 0)), this.battery + 4);
@@ -1436,6 +1507,11 @@ class Player {
     }
     else if (this.slashAnimTime > 0) drawState = 'slash';
     else if (this.shootAnimTime > 0) drawState = 'shoot';
+    else if (this.animState === 'backwalk') {
+      const backImg = ANIM_IMAGES['backwalk'];
+      const backOk = backImg && backImg.complete && backImg.naturalWidth > 0;
+      drawState = backOk ? 'backwalk' : 'walk';
+    }
     else if (this.animState === 'walk') drawState = 'walk';
     else drawState = 'idle';
     
@@ -1479,7 +1555,7 @@ class Player {
     // idle/walk 시 살짝 위아래 보브
     let bobY = 0;
     if (drawState === 'idle') bobY = Math.sin(this.animTime * 4) * 0;
-    else if (drawState === 'walk') bobY = Math.abs(Math.sin(this.animTime * 14)) * -2;
+    else if (drawState === 'walk' || drawState === 'backwalk') bobY = Math.abs(Math.sin(this.animTime * 14)) * -2;
     
     // 부활 직후 무적: 깜빡거림 효과
     let invulnAlpha = 1;
@@ -1546,7 +1622,7 @@ class Player {
       ctx.save();
       ctx.fillStyle = 'rgba(0,0,0,0.72)';
       ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
-      ctx.fillStyle = '#00f5ff';
+      ctx.fillStyle = this.slowMoCooldown > 0 ? '#4a6f78' : '#00f5ff';
       ctx.shadowBlur = STATE.slowMo ? 14 : 7;
       ctx.shadowColor = '#00f5ff';
       ctx.fillRect(bx, by, bw * ratio, bh);
@@ -1918,6 +1994,13 @@ class Enemy {
       this.aimTime = 2;
       this.aiming = 0;
     }
+    
+    const diff = difficultyConfig();
+    this.speed *= diff.enemySpeedMult;
+    if (this.attackCd !== undefined) this.attackCd *= diff.enemyAttackCdMult;
+    if (this.aimTime !== undefined) this.aimTime *= diff.enemyAimTimeMult;
+    if (this.burstInterval !== undefined) this.burstInterval *= diff.enemyAttackCdMult;
+    if (this.dodgeSlideCd !== undefined) this.dodgeSlideCd *= diff.enemyAttackCdMult;
   }
   
   // 화면(viewport) 안에 있는지 — 경계면 밖이면 무적 + 사격 X
@@ -2220,6 +2303,9 @@ class Enemy {
         telegraphTime = 0.6;
         attackCd = 1.0;
       }
+      const diff = difficultyConfig();
+      telegraphTime *= diff.enemyTelegraphMult;
+      attackCd *= diff.enemyAttackCdMult;
       const hitRange = this.r + player.r + 8;       // 실제 적중 판정 거리
       const d = dist(this, player);
       
@@ -5142,6 +5228,7 @@ let drone = null;
 const ANIMATIONS = {
   idle:  { src: 'images/player_idle.png',  frameW: 128, frameH: 128, frameCount: 4, fps: 4,  loop: true  },
   walk:  { src: 'images/player_move.png',  frameW: 128, frameH: 128, frameCount: 4, fps: 8,  loop: true  },
+  backwalk: { src: 'images/player_backwalk.png', frameW: 128, frameH: 128, frameCount: 4, fps: 8, loop: true },
   shoot: { src: 'images/player_shoot.png', frameW: 128, frameH: 128, frameCount: 4, fps: 16, loop: false },
   slash: { src: 'images/player_slash.png', frameW: 128, frameH: 128, frameCount: 4, fps: 14, loop: false },
   // 슬라이딩(구르기) 전용 이미지 — 파일이 없으면 자동으로 walk 로 폴백
@@ -6008,7 +6095,9 @@ function update(dt) {
   
   // 슬로우모션: 플레이어 외 모든 entity의 시간만 느리게
   // STATE.slowMo는 player.update 안에서 설정됨 (이 시점엔 이미 갱신된 상태)
-  const enemyDt = STATE.slowMo ? dt * STATE.slowMoFactor : dt;
+  const baseEnemyDt = STATE.slowMo ? dt * STATE.slowMoFactor : dt;
+  const enemyDt = baseEnemyDt;
+  const bossDt = baseEnemyDt * difficultyConfig().bossTimeScale;
   
   // 슬로우모션 시각 강도 페이드 (켜고 끌 때 부드럽게)
   if (STATE.slowMo) {
@@ -6022,11 +6111,11 @@ function update(dt) {
   
   // Update entities — 적/총알/효과는 슬로우모션 영향 받음
   for (const en of enemies) en.update(enemyDt);
-  if (bossEntity) bossEntity.update(enemyDt);
+  if (bossEntity) bossEntity.update(bossDt);
   for (const b of bullets) b.update(dt);                  // 플레이어 총알은 정상속도 (플레이어가 쏘는 거니까)
   for (const eb of enemyBullets) {
     // 플레이어가 반사한 총알은 정상속도, 적 총알은 슬로우모션
-    eb.update(eb.fromPlayer ? dt : enemyDt);
+    eb.update(eb.fromPlayer ? dt : baseEnemyDt);
   }
   for (const p of particles) p.update(dt);                // 파티클은 정상속도 유지 (시각 효과)
   for (const pk of pickups) pk.update(dt);                // 픽업도 정상속도 (플레이어와 상호작용)
@@ -6391,9 +6480,14 @@ function drawTitleBg() {
 }
 drawTitleBg();
 
+document.querySelectorAll('[data-difficulty]').forEach(btn => {
+  btn.addEventListener('click', () => setDifficulty(btn.dataset.difficulty));
+});
+setDifficulty(STATE.difficulty);
+
 document.getElementById('startBtn').addEventListener('click', () => startGame(false));
 document.getElementById('tutorialBtn').addEventListener('click', () => {
-  // 튜토리얼: 인트로 스토리 → 튜토리얼 게임플레이 → 본 게임
+  // ?쒗넗由ъ뼹: ?명듃濡??ㅽ넗由????쒗넗由ъ뼹 寃뚯엫?뚮젅????蹂?寃뚯엫
   document.getElementById('titleScreen').style.display = 'none';
   initAudio();
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
