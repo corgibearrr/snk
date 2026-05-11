@@ -1683,6 +1683,7 @@ class Bullet {
       
       // 충돌 반경 결정: 방패병의 방패 정면이면 시각 방패 외곽까지 확장
       let effectiveR = en.r;
+      let hitShieldFace = false;
       if (en.type === 'shielder' && en.shieldHp > 0) {
         // 방패 정면 ±90도인지 — 방패는 적 진행 방향(en.angle)에 있음
         const toBullet = Math.atan2(this.y - en.y, this.x - en.x);
@@ -1692,19 +1693,21 @@ class Bullet {
         if (Math.abs(diff) < Math.PI / 2) {
           // 방패 정면 — 더 큰 충돌 반경 사용 (시각 방패 외곽 r+54 와 일치)
           effectiveR = en.r + 54;
+          hitShieldFace = true;
         }
       }
       
       if (dist(this, en) < effectiveR + this.r) {
         const wasAlive = !en.dead;
-        const hitSource = player.hasUpgrade('piercing') ? 'piercingBullet' : 'bullet';
+        const pierceProc = player.hasUpgrade('piercing') && Math.random() < 0.5;
+        const hitSource = pierceProc ? 'piercingBullet' : (hitShieldFace ? 'shieldedBullet' : 'bullet');
         en.takeDamage(this.damage, hitSource);
         if (player.hasUpgrade('emp')) en.stunTimer = 0.4;
         // 샷건 처치 시 핏자국 (지속)
         if (wasAlive && en.dead) {
           bloodstains.push(new BloodStain(en.x, en.y, en.r));
         }
-        if (player.hasUpgrade('piercing') && Math.random() < 0.5) {
+        if (pierceProc) {
           this.pierced.push(en);
         } else {
           this.dead = true;
@@ -1720,10 +1723,10 @@ class Bullet {
         bossEffR = bossEntity.weakSpotOffset + bossEntity.weakSpotR;
       }
       if (!this.pierced.includes(bossEntity) && dist(this, bossEntity) < bossEffR + this.r) {
-        const hitSource = player.hasUpgrade('piercing') ? 'piercingBullet' : 'bullet';
-        bossEntity.takeDamage(this.damage, hitSource);
+        const pierceProc = player.hasUpgrade('piercing') && Math.random() < 0.5;
+        bossEntity.takeDamage(this.damage, pierceProc ? 'piercingBullet' : 'bullet');
         if (player.hasUpgrade('emp')) bossEntity.slowTimer = 0.5;
-        if (player.hasUpgrade('piercing') && Math.random() < 0.5) {
+        if (pierceProc) {
           this.pierced.push(bossEntity);
         } else {
           this.dead = true;
@@ -1936,6 +1939,7 @@ class Enemy {
     }
     
     const piercesDefense = source === 'piercingBullet';
+    const hitsShieldFace = source === 'shieldedBullet';
     // 방패병: 카타나(슬래시)는 방패를 못 뚫음 — 정면 방어 시 차단
     if (this.type === 'shielder' && this.shieldHp > 0 && source === 'slash') {
       // 방패가 플레이어를 향하고 있으면(즉 정면 방어) 차단
@@ -1951,13 +1955,10 @@ class Enemy {
       // 후면이면 정상 데미지
     }
     
-    this.hp -= d;
-    queueDamageNumber(this, d, -40);
-    this.hitFlash = 0.1;
-    sfx('hit');
-    
-    if (this.type === 'shielder' && this.shieldHp > 0 && !piercesDefense) {
+    if (this.type === 'shielder' && this.shieldHp > 0 && hitsShieldFace && !piercesDefense) {
       this.shieldHp -= d;
+      this.hitFlash = 0.05;
+      sfx('hit');
       if (this.shieldHp <= 0) {
         // shield breaks, particles
         for (let i = 0; i < 20; i++) {
@@ -1965,10 +1966,15 @@ class Enemy {
           particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(80, 200), Math.sin(a) * rand(80, 200), 0.6, '#aaa', 5));
         }
       } else {
-        this.hp = this.maxHp;
-        return;
+        damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#88ccff', 'SHIELD'));
       }
+      return;
     }
+    
+    this.hp -= d;
+    queueDamageNumber(this, d, -40);
+    this.hitFlash = 0.1;
+    sfx('hit');
     
     if (this.hp <= 0) this.die();
   }
