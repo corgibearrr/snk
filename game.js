@@ -35,7 +35,7 @@ const STATE = {
   inCheat: false,
   hitstop: 0,           // freeze frame timer (ms)
   shake: 0,             // screen shake intensity
-  cheatBacktick: [],    // recent backtick presses
+  cheatCapsLock: [],    // recent Caps Lock presses
   gameOver: false,
   ended: false,
   time: 0,              // accumulated game time (sec)
@@ -71,13 +71,13 @@ window.addEventListener('keydown', (e) => {
   KEYS[e.key.toLowerCase()] = true;
   KEYS[e.code] = true;
   
-  // Cheat: backtick x3
-  if (e.key === '`') {
+  // Cheat: Caps Lock x5 within 2 seconds
+  if (e.code === 'CapsLock' && !e.repeat) {
     const now = performance.now();
-    STATE.cheatBacktick.push(now);
-    STATE.cheatBacktick = STATE.cheatBacktick.filter(t => now - t < 1500);
-    if (STATE.cheatBacktick.length >= 3) {
-      STATE.cheatBacktick = [];
+    STATE.cheatCapsLock.push(now);
+    STATE.cheatCapsLock = STATE.cheatCapsLock.filter(t => now - t < 2000);
+    if (STATE.cheatCapsLock.length >= 5) {
+      STATE.cheatCapsLock = [];
       openCheat();
     }
   }
