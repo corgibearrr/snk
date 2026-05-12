@@ -98,12 +98,34 @@ const DIFFICULTY_SETTINGS = {
   },
 };
 
+function normalizeDifficultyKey(key) {
+  return DIFFICULTY_SETTINGS[key] ? key : 'normal';
+}
+
 function difficultyConfig() {
-  return DIFFICULTY_SETTINGS[STATE.difficulty] || DIFFICULTY_SETTINGS.normal;
+  return DIFFICULTY_SETTINGS[normalizeDifficultyKey(STATE.difficulty)];
+}
+
+function difficultyLabel(key) {
+  const labels = {
+    hero: '\uc8fc\uc778\uacf5',
+    normal: '\ubcf4\ud1b5',
+    dystopia: '\ub514\uc2a4\ud1a0\ud53c\uc544',
+  };
+  return labels[normalizeDifficultyKey(key)] || labels.normal;
+}
+
+function difficultyScoreMultiplier(key) {
+  const multipliers = {
+    hero: 1,
+    normal: 1.5,
+    dystopia: 2.25,
+  };
+  return multipliers[normalizeDifficultyKey(key)] || multipliers.normal;
 }
 
 function setDifficulty(key) {
-  STATE.difficulty = DIFFICULTY_SETTINGS[key] ? key : 'normal';
+  STATE.difficulty = normalizeDifficultyKey(key);
   document.querySelectorAll('[data-difficulty]').forEach(btn => {
     btn.classList.toggle('selected', btn.dataset.difficulty === STATE.difficulty);
   });
@@ -742,6 +764,7 @@ function updateDamageNumberBuckets(dt) {
   }
 }
 let bloodstains = [];    // 샷건 처치 시 남는 핏자국 (오래 지속)
+let corpseStains = [];    // 적 사망 시 잠시 남는 시체 이미지
 let respawnQueue = [];   // 파괴된 장애물 리스폰 큐 ({x, y, w, h, explosive, timer})
 let holograms = [];      // 리스폰 직전 표시되는 푸른 홀로그램
 let bossEntity = null;
@@ -2064,6 +2087,7 @@ class Enemy {
   
   die() {
     this.dead = true;
+    corpseStains.push(new CorpseStain(this));
     sfx('hit');
     
     // 통계: 킬 수 증가 (튜토리얼 적은 카운트 안 함)
@@ -2112,8 +2136,7 @@ class Enemy {
     
     if (this.type === 'rusher') {
       this.angle = targetAngle;
-      this.x += Math.cos(targetAngle) * this.speed * dt;
-      this.y += Math.sin(targetAngle) * this.speed * dt;
+      moveEnemyAroundObstacles(this, Math.cos(targetAngle) * this.speed * dt, Math.sin(targetAngle) * this.speed * dt);
       // 공격은 아래 telegraph 시스템에서 처리됨
     } else if (this.type === 'shooter') {
       this.angle = targetAngle;
@@ -2160,11 +2183,9 @@ class Enemy {
       } else {
         // 평시 — 거리 유지하며 이동
         if (d < this.preferredDist - 30) {
-          this.x -= Math.cos(targetAngle) * this.speed * dt;
-          this.y -= Math.sin(targetAngle) * this.speed * dt;
+          moveEnemyAroundObstacles(this, -Math.cos(targetAngle) * this.speed * dt, -Math.sin(targetAngle) * this.speed * dt);
         } else if (d > this.preferredDist + 30) {
-          this.x += Math.cos(targetAngle) * this.speed * dt * 0.7;
-          this.y += Math.sin(targetAngle) * this.speed * dt * 0.7;
+          moveEnemyAroundObstacles(this, Math.cos(targetAngle) * this.speed * dt * 0.7, Math.sin(targetAngle) * this.speed * dt * 0.7);
         }
         // 사정거리(700) 안에 들어오고 쿨다운 끝나면 조준 시작
         if (this.cooldown <= 0 && d < 700 && this.isOnScreen()) {
@@ -2178,8 +2199,7 @@ class Enemy {
       while (diff < -Math.PI) diff += TAU;
       this.angle += clamp(diff, -this.turnSpeed * dt, this.turnSpeed * dt);
       
-      this.x += Math.cos(this.angle) * this.speed * dt;
-      this.y += Math.sin(this.angle) * this.speed * dt;
+      moveEnemyAroundObstacles(this, Math.cos(this.angle) * this.speed * dt, Math.sin(this.angle) * this.speed * dt);
       
       if (this.cooldown <= 0 && d < 375 && this.isOnScreen()) {
         // 방패병 샷건: 5발 산탄
@@ -2200,10 +2220,7 @@ class Enemy {
       if (this.dodgeSlideTime > 0) {
         this.dodgeSlideTime -= dt;
         const slideSpeed = this.speed * 1.4;
-        this.x += this.dodgeSlideDir.x * slideSpeed * dt;
-        this.y += this.dodgeSlideDir.y * slideSpeed * dt;
-        this.x = clamp(this.x, this.r, WORLD.w - this.r);
-        this.y = clamp(this.y, this.r, WORLD.h - this.r);
+        moveEnemyAroundObstacles(this, this.dodgeSlideDir.x * slideSpeed * dt, this.dodgeSlideDir.y * slideSpeed * dt);
       } else {
         if (this.dodgeSlideCd > 0) this.dodgeSlideCd -= dt;
         // 가까운 위협(플레이어 총알) 감지 → 회피 슬라이드
@@ -2246,16 +2263,14 @@ class Enemy {
           this.dashAngle = targetAngle + rand(-1, 1);
           this.dashTimer = rand(0.3, 0.7);
         }
-        this.x += Math.cos(this.dashAngle) * this.speed * dt;
-        this.y += Math.sin(this.dashAngle) * this.speed * dt;
+        moveEnemyAroundObstacles(this, Math.cos(this.dashAngle) * this.speed * dt, Math.sin(this.dashAngle) * this.speed * dt);
       }
       // 공격은 아래 telegraph 시스템에서 처리됨
     } else if (this.type === 'sniper') {
       this.angle = targetAngle;
       // Maintain far distance
       if (d < this.preferredDist - 50) {
-        this.x -= Math.cos(targetAngle) * this.speed * dt;
-        this.y -= Math.sin(targetAngle) * this.speed * dt;
+        moveEnemyAroundObstacles(this, -Math.cos(targetAngle) * this.speed * dt, -Math.sin(targetAngle) * this.speed * dt);
       }
       
       // 화면 밖이면 조준 취소 (무적 + 사격 X)
@@ -2586,7 +2601,7 @@ class Boss extends Enemy {
       this.slidingCd = 0;
       this.slidingDir = {x: 0, y: 0};
     } else if (level === 4) { // CP-09
-      this.hp = 120; this.maxHp = 120;        // 50 → 120
+      this.hp = 620; this.maxHp = 620;        // 50 → 120
       this.name = 'CP-09';
       this.speed = 75;
       this.color = '#00aaff';
@@ -2864,16 +2879,14 @@ class Boss extends Enemy {
       if (this.lateralSlideTime > 0) {
         this.lateralSlideTime -= dt;
         const slideSpeed = 1400;
-        this.x += this.lateralSlideDir.x * slideSpeed * dt;
-        this.y += this.lateralSlideDir.y * slideSpeed * dt;
+        moveEnemyAroundObstacles(this, this.lateralSlideDir.x * slideSpeed * dt, this.lateralSlideDir.y * slideSpeed * dt);
         // 슬라이드 잔상
         if (Math.random() < 0.7) {
           particles.push(new Particle(this.x, this.y, rand(-40, 40), rand(-40, 40), 0.35, '#ffaa00', 5));
         }
       } else {
         // 평시 이동: 플레이어 추적
-        this.x += Math.cos(targetAngle) * this.speed * dt;
-        this.y += Math.sin(targetAngle) * this.speed * dt;
+        moveEnemyAroundObstacles(this, Math.cos(targetAngle) * this.speed * dt, Math.sin(targetAngle) * this.speed * dt);
         
         // 슬라이드 트리거 — 불규칙 주기 (자주 발동)
         if (this.lateralSlideCd <= 0 && d < 1500) {
@@ -2977,8 +2990,7 @@ class Boss extends Enemy {
           // 짧고 빠른 돌진 (속도 20% 감소: 1700 → 1360)
           this.tripleDashTimer -= dt;
           const dashSpeed = 1360;
-          this.x += Math.cos(this.tripleDashAngle) * dashSpeed * dt;
-          this.y += Math.sin(this.tripleDashAngle) * dashSpeed * dt;
+          moveEnemyAroundObstacles(this, Math.cos(this.tripleDashAngle) * dashSpeed * dt, Math.sin(this.tripleDashAngle) * dashSpeed * dt);
           
           // 강화된 잔상 — 캐릭터 잔상 + 파티클 트레일
           // 1) 매우 자주 잔상 파티클 (진로를 따라 길게 늘어짐)
@@ -3158,8 +3170,7 @@ class Boss extends Enemy {
           }
         } else {
           // 평시 이동
-          this.x += Math.cos(targetAngle) * this.speed * dt;
-          this.y += Math.sin(targetAngle) * this.speed * dt;
+          moveEnemyAroundObstacles(this, Math.cos(targetAngle) * this.speed * dt, Math.sin(targetAngle) * this.speed * dt);
           
           // 트리플 대시 트리거 (가까운 거리)
           if (this.tripleDashCd <= 0 && d < 600 && d > 100 && this.isOnScreen()) {
@@ -3194,8 +3205,7 @@ class Boss extends Enemy {
       if (this.slidingTime > 0) {
         this.slidingTime -= dt;
         const slideSpeed = 700;
-        this.x += this.slidingDir.x * slideSpeed * dt;
-        this.y += this.slidingDir.y * slideSpeed * dt;
+        moveEnemyAroundObstacles(this, this.slidingDir.x * slideSpeed * dt, this.slidingDir.y * slideSpeed * dt);
         // 잔상 파티클 — 보라색 강조 (슬라이딩 중 무적임을 시각적으로)
         if (Math.random() < 0.8) {
           particles.push(new Particle(this.x, this.y, rand(-30, 30), rand(-30, 30), 0.4, '#ff60ff', 6));
@@ -3303,8 +3313,7 @@ class Boss extends Enemy {
       }
       
       // Slow drift
-      this.x += Math.cos(targetAngle + Math.PI * 0.7) * this.speed * dt;
-      this.y += Math.sin(targetAngle + Math.PI * 0.7) * this.speed * dt;
+      moveEnemyAroundObstacles(this, Math.cos(targetAngle + Math.PI * 0.7) * this.speed * dt, Math.sin(targetAngle + Math.PI * 0.7) * this.speed * dt);
       
       // 리퍼는 무한 사거리 — 화면 밖이든 맵 끝이든 조준 가능
       // 카타나 패링이 없으면 살아남기 어려운 강도로 사격
@@ -3365,8 +3374,7 @@ class Boss extends Enemy {
       this.cp09FireCd -= dt;
       
       // drift
-      this.x += Math.cos(this.phaseTimer * 0.5) * this.speed * dt;
-      this.y += Math.sin(this.phaseTimer * 0.7) * this.speed * dt;
+      moveEnemyAroundObstacles(this, Math.cos(this.phaseTimer * 0.5) * this.speed * dt, Math.sin(this.phaseTimer * 0.7) * this.speed * dt);
       
       // Spawn enemies (화면 안에 있을 때만)
       if (this.spawnTimer <= 0 && enemies.length < 15 && this.isOnScreen()) {
@@ -3456,8 +3464,7 @@ class Boss extends Enemy {
         this.geminatorPhase === 'laser' || 
         this.geminatorPhase === 'cooling'
       ) ? 0 : this.speed;
-      this.x += Math.cos(this.angle) * moveSpeed * dt;
-      this.y += Math.sin(this.angle) * moveSpeed * dt;
+      moveEnemyAroundObstacles(this, Math.cos(this.angle) * moveSpeed * dt, Math.sin(this.angle) * moveSpeed * dt);
       
       const phaseAge = this.phaseTimer - this.phaseStartedAt;
       
@@ -4720,6 +4727,41 @@ class BloodStain {
   }
 }
 
+class CorpseStain {
+  constructor(enemy) {
+    this.x = enemy.x;
+    this.y = enemy.y;
+    this.r = enemy.r;
+    this.type = enemy.type;
+    this.angle = enemy.angle || 0;
+    this.facingLeft = !!enemy.facingLeft;
+    this.life = 12;
+    this.life0 = 12;
+    this.fadeStart = 8;
+    this.dead = false;
+  }
+  update(dt) {
+    this.life -= dt;
+    if (this.life <= 0) this.dead = true;
+  }
+  draw() {
+    const key = `enemy_${this.type}_dead`;
+    const conf = ENTITY_IMAGES[key];
+    const img = ENTITY_IMG[key];
+    if (!conf || !img || !img.complete || img.naturalWidth <= 0) return;
+    
+    const s = worldToScreen(this.x, this.y);
+    const size = conf.size || this.r * 2;
+    if (s.x + size < 0 || s.x - size > W || s.y + size < 0 || s.y - size > H) return;
+    
+    const alpha = this.life > this.fadeStart ? 0.9 : 0.9 * (this.life / this.fadeStart);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    drawEntityImage(key, s.x, s.y, this.angle, this.facingLeft);
+    ctx.restore();
+  }
+}
+
 class SlashImpactFlash {
   constructor(x, y) {
     this.x = x; this.y = y;
@@ -5255,6 +5297,13 @@ const ENTITY_IMAGES = {
   enemy_shielder:  { src: 'images/enemy_shielder.png',  size: 160, rotate: false, flip: false },
   enemy_assassin:  { src: 'images/enemy_assassin.png',  size: 128, rotate: false, flip: false },
   enemy_sniper:    { src: 'images/enemy_sniper.png',    size: 128, rotate: false, flip: false },
+  
+  // 일반 적 사망 잔상. 파일이 없으면 표시하지 않고 넘어갑니다.
+  enemy_rusher_dead:    { src: 'images/enemy_rusher_dead.png',    size: 128, rotate: false, flip: false },
+  enemy_shooter_dead:   { src: 'images/enemy_shooter_dead.png',   size: 128, rotate: false, flip: false },
+  enemy_shielder_dead:  { src: 'images/enemy_shielder_dead.png',  size: 160, rotate: false, flip: false },
+  enemy_assassin_dead:  { src: 'images/enemy_assassin_dead.png',  size: 128, rotate: false, flip: false },
+  enemy_sniper_dead:    { src: 'images/enemy_sniper_dead.png',    size: 128, rotate: false, flip: false },
   
   // 보스 (5종) — 기존 대비 약 2배 확대. 회전 X.
   boss_baekgyu:    { src: 'images/boss_baekgyu.png',    size: 128, rotate: false, flip: false },  // 백규
@@ -5915,6 +5964,76 @@ function resolvePlayerObstacles() {
   }
 }
 
+function circleHitsObstacleAt(ent, x, y) {
+  const r = ent.obstacleRadius || ent.r * 0.72;
+  for (const ob of obstacles) {
+    if (ob.dead) continue;
+    const left = ob.x - ob.w / 2;
+    const right = ob.x + ob.w / 2;
+    const top = ob.y - ob.h / 2;
+    const bottom = ob.y + ob.h / 2;
+    const cx = clamp(x, left, right);
+    const cy = clamp(y, top, bottom);
+    if (Math.hypot(x - cx, y - cy) < r) return true;
+  }
+  return false;
+}
+
+function moveEnemyAroundObstacles(ent, dx, dy) {
+  if (!dx && !dy) return;
+  const sx = ent.x;
+  const sy = ent.y;
+  if (circleHitsObstacleAt(ent, sx, sy)) {
+    ent.x = clamp(sx + dx, ent.r, WORLD.w - ent.r);
+    ent.y = clamp(sy + dy, ent.r, WORLD.h - ent.r);
+    return;
+  }
+  let blockedX = false;
+  let blockedY = false;
+  
+  if (dx) {
+    const nx = clamp(sx + dx, ent.r, WORLD.w - ent.r);
+    if (!circleHitsObstacleAt(ent, nx, ent.y)) ent.x = nx;
+    else blockedX = true;
+  }
+  
+  if (dy) {
+    const ny = clamp(sy + dy, ent.r, WORLD.h - ent.r);
+    if (!circleHitsObstacleAt(ent, ent.x, ny)) ent.y = ny;
+    else blockedY = true;
+  }
+  
+  if (blockedX || blockedY) {
+    const len = Math.hypot(dx, dy);
+    if (len > 0) {
+      const step = Math.min(len, ent.speed ? ent.speed / 25 : len);
+      const options = [
+        { x: sx - dy / len * step, y: sy + dx / len * step },
+        { x: sx + dy / len * step, y: sy - dx / len * step },
+      ];
+      let best = null;
+      let bestScore = Infinity;
+      for (const opt of options) {
+        opt.x = clamp(opt.x, ent.r, WORLD.w - ent.r);
+        opt.y = clamp(opt.y, ent.r, WORLD.h - ent.r);
+        if (circleHitsObstacleAt(ent, opt.x, opt.y)) continue;
+        const score = player ? Math.hypot(opt.x - player.x, opt.y - player.y) : 0;
+        if (score < bestScore) {
+          bestScore = score;
+          best = opt;
+        }
+      }
+      if (best) {
+        ent.x = best.x;
+        ent.y = best.y;
+      }
+    }
+  }
+  
+  ent.x = clamp(ent.x, ent.r, WORLD.w - ent.r);
+  ent.y = clamp(ent.y, ent.r, WORLD.h - ent.r);
+}
+
 // =============================================================
 // BG GRID DRAW
 // =============================================================
@@ -6123,6 +6242,7 @@ function update(dt) {
   updateDamageNumberBuckets(dt);
   for (const dn of damageNumbers) dn.update(dt);
   for (const bs of bloodstains) bs.update(dt);
+  for (const cs of corpseStains) cs.update(dt);
   for (const h of holograms) h.update(dt);
   
   // 리스폰 큐 처리: 60초 카운트다운 → 0 도달 시 홀로그램으로 변환
@@ -6140,6 +6260,13 @@ function update(dt) {
     }
   }
   
+  // 2분이 지나면 플레이어에게서 너무 먼 일반 적은 보스 진입을 막지 않도록 정리
+  if (player && STATE.time - STATE.phaseStartTime > 120) {
+    for (const en of enemies) {
+      if (!en.dead && dist(en, player) > 2000) en.dead = true;
+    }
+  }
+  
   // Cleanup
   enemies = enemies.filter(e => !e.dead);
   bullets = bullets.filter(b => !b.dead);
@@ -6150,6 +6277,7 @@ function update(dt) {
   damageNumbers = damageNumbers.filter(d => !d.dead);
   obstacles = obstacles.filter(o => !o.dead);
   bloodstains = bloodstains.filter(bs => !bs.dead);
+  corpseStains = corpseStains.filter(cs => !cs.dead);
   holograms = holograms.filter(h => !h.dead);
   
   // Boss flow
@@ -6191,20 +6319,40 @@ function update(dt) {
   spawnLogic(dt);
 }
 
+function drawDepthSortedWorldEntities() {
+  const items = [];
+  for (const ob of obstacles) {
+    if (!ob.dead) items.push({ y: ob.y + ob.h / 2, draw: () => ob.draw() });
+  }
+  for (const pk of pickups) {
+    if (!pk.dead) items.push({ y: pk.y + 18, draw: () => pk.draw() });
+  }
+  for (const en of enemies) {
+    if (!en.dead) items.push({ y: en.y + en.r, draw: () => en.draw() });
+  }
+  if (bossEntity && !bossEntity.dead) {
+    items.push({ y: bossEntity.y + bossEntity.r, draw: () => bossEntity.draw() });
+  }
+  if (player) {
+    items.push({ y: player.y + player.r, draw: () => player.draw() });
+  }
+  if (drone) {
+    items.push({ y: drone.y + 20, draw: () => drone.draw() });
+  }
+  items.sort((a, b) => a.y - b.y);
+  for (const item of items) item.draw();
+}
+
 function draw() {
   drawBackground();
   
   // World entities
   for (const bs of bloodstains) bs.draw();   // 핏자국은 가장 먼저 (땅 위, 다른 것 아래)
+  for (const cs of corpseStains) cs.draw();  // 시체 이미지는 핏자국 위, 살아있는 객체 아래
   for (const h of holograms) h.draw();       // 홀로그램은 핏자국 위에
-  for (const ob of obstacles) ob.draw();
-  for (const pk of pickups) pk.draw();
-  for (const en of enemies) en.draw();
-  if (bossEntity && !bossEntity.dead) bossEntity.draw();
+  drawDepthSortedWorldEntities();
   // 보스 화면 밖이면 화살표/마커로 위치 표시 (리퍼 제외 — 리퍼는 은신/저격 컨셉)
   if (bossEntity && !bossEntity.dead && bossEntity.level !== 3) drawBossOffscreenMarker();
-  if (player) player.draw();
-  if (drone) drone.draw();
   for (const b of bullets) b.draw();
   for (const eb of enemyBullets) eb.draw();
   for (const e of effects) e.draw();
@@ -6358,6 +6506,7 @@ function startGame() {
   damageNumbers = [];
   damageNumberBuckets = new Map();
   bloodstains = [];
+  corpseStains = [];
   obstacles = [];
   respawnQueue = [];
   holograms = [];
@@ -6794,6 +6943,7 @@ function startTutorial() {
   damageNumbers = [];
   damageNumberBuckets = new Map();
   bloodstains = [];
+  corpseStains = [];
   obstacles = [];
   respawnQueue = [];
   holograms = [];
@@ -6981,13 +7131,13 @@ const BOSS_CUTSCENES = {
   ],
   // 페이즈 4: CP-09
   4: [
-    { side: 'right', name: 'CP-09', text: '— 적성 식별. 회수반 요원.\n위협등급 갱신: 격상.', portrait: 'images/boss4_cp09.png' },
+    { side: 'right', name: 'CP-09', text: '—적성 식별. 참진리 연구회 회수요원.\n위협등급 갱신: 최상.', portrait: 'images/boss4_cp09.png' },
     { side: 'left',  name: '사마엘', text: '기계인가. 그쪽이 더 깔끔하겠군.', portrait: 'images/standing.png' },
     { side: 'right', name: 'CP-09', text: '제거 절차 개시.', portrait: 'images/boss4_cp09.png' },
   ],
   // 페이즈 5: 제미네이터 (최종 보스)
   5: [
-    { side: 'right', name: '제미네이터', text: '여기까지 왔나, 회수반.', portrait: 'images/boss5_geminator.png' },
+    { side: 'right', name: '제미네이터', text: '여기까지 왔나, 광신도.', portrait: 'images/boss5_geminator.png' },
     { side: 'left',  name: '사마엘', text: '네녀석이 마지막인가? \n슬슬 지겹군.', portrait: 'images/standing.png' },
     { side: 'right', name: '제미네이터', text: '\"진리\"는 독점할 수 있는게 아니야.\n우주는 모두에게 열려 있어야지.', portrait: 'images/boss5_geminator.png' },
     { side: 'left',  name: '사마엘', text: '너희 같은 무지렁이들이 진리를 들여다보면\n그건 진리가 아니라 재앙이 된다.', portrait: 'images/standing.png' },
@@ -7137,6 +7287,7 @@ function toSupabaseRankingEntry(entry) {
     phase: entry.phase,
     survived_sec: entry.survivedSec,
     cleared: !!entry.cleared,
+    difficulty: normalizeDifficultyKey(entry.difficulty),
     client_run_id: entry.clientRunId || entry.date,
     created_at: entry.date,
   };
@@ -7153,6 +7304,7 @@ function fromSupabaseRankingEntry(row) {
     phase: row.phase || 1,
     survivedSec: row.survived_sec || 0,
     cleared: !!row.cleared,
+    difficulty: normalizeDifficultyKey(row.difficulty || 'normal'),
     date: row.created_at || new Date().toISOString(),
     clientRunId: row.client_run_id || '',
     remote: true,
@@ -7161,16 +7313,25 @@ function fromSupabaseRankingEntry(row) {
 
 async function fetchServerRanking() {
   if (!SUPABASE_RANKING_ENABLED || typeof fetch !== 'function') return null;
-  const url = new URL(`${SUPABASE_URL}/rest/v1/${SUPABASE_RANKING_TABLE}`);
-  url.searchParams.set('select', 'player_name,rank,total,kills,boss_kills,earned,phase,survived_sec,cleared,created_at,client_run_id');
-  url.searchParams.set('order', 'total.desc,survived_sec.desc,created_at.asc');
-  url.searchParams.set('limit', String(RANKING_MAX_ENTRIES));
-  const res = await fetch(url.toString(), {
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-    },
-  });
+  
+  const requestRanking = async (withDifficulty) => {
+    const url = new URL(`${SUPABASE_URL}/rest/v1/${SUPABASE_RANKING_TABLE}`);
+    const fields = withDifficulty
+      ? 'player_name,rank,total,kills,boss_kills,earned,phase,survived_sec,cleared,difficulty,created_at,client_run_id'
+      : 'player_name,rank,total,kills,boss_kills,earned,phase,survived_sec,cleared,created_at,client_run_id';
+    url.searchParams.set('select', fields);
+    url.searchParams.set('order', 'total.desc,survived_sec.desc,created_at.asc');
+    url.searchParams.set('limit', String(RANKING_MAX_ENTRIES));
+    return fetch(url.toString(), {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+      },
+    });
+  };
+  
+  let res = await requestRanking(true);
+  if (!res.ok) res = await requestRanking(false);
   if (!res.ok) throw new Error(`ranking fetch failed: ${res.status}`);
   const rows = await res.json();
   return Array.isArray(rows) ? rows.map(fromSupabaseRankingEntry) : [];
@@ -7178,7 +7339,8 @@ async function fetchServerRanking() {
 
 async function saveServerRankingEntry(entry) {
   if (!SUPABASE_RANKING_ENABLED || typeof fetch !== 'function') return null;
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_RANKING_TABLE}`, {
+  const payload = toSupabaseRankingEntry(entry);
+  let res = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_RANKING_TABLE}`, {
     method: 'POST',
     headers: {
       apikey: SUPABASE_KEY,
@@ -7186,8 +7348,22 @@ async function saveServerRankingEntry(entry) {
       'Content-Type': 'application/json',
       Prefer: 'return=representation',
     },
-    body: JSON.stringify(toSupabaseRankingEntry(entry)),
+    body: JSON.stringify(payload),
   });
+  if (!res.ok && payload.difficulty) {
+    const fallbackPayload = { ...payload };
+    delete fallbackPayload.difficulty;
+    res = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_RANKING_TABLE}`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify(fallbackPayload),
+    });
+  }
   if (!res.ok) throw new Error(`ranking save failed: ${res.status}`);
   return fetchServerRanking();
 }
@@ -7259,7 +7435,10 @@ function computeFinalScore() {
     clearBonus: STATE.ended ? 20000 : 0,
     noDeath:    (!STATE.gameOver && lives === maxLives) ? 5000 : 0,
   };
-  const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+  const rawTotal = Object.values(breakdown).reduce((a, b) => a + b, 0);
+  const difficulty = normalizeDifficultyKey(STATE.difficulty);
+  const difficultyMultiplier = difficultyScoreMultiplier(difficulty);
+  const total = Math.round(rawTotal * difficultyMultiplier);
   
   let rank = 'D';
   if (total >= 80000) rank = 'S';
@@ -7269,8 +7448,10 @@ function computeFinalScore() {
   
   return {
     survivedSec, kills, bossKills, earned, phase,
-    breakdown, total, rank,
+    breakdown, rawTotal, total, rank,
     cleared: STATE.ended,
+    difficulty,
+    difficultyMultiplier,
     date: new Date().toISOString(),
   };
 }
@@ -7305,6 +7486,9 @@ function buildResultPanelHTML(result) {
   ];
   if (b.clearBonus > 0) rows.push(['클리어 보너스', '★', `+${fmtNum(b.clearBonus)}`]);
   if (b.noDeath > 0)    rows.push(['NO DEATH', '♥♥♥', `+${fmtNum(b.noDeath)}`]);
+  if (result.difficultyMultiplier && result.difficultyMultiplier !== 1) {
+    rows.push(['난이도 보정', difficultyLabel(result.difficulty), `x${result.difficultyMultiplier}`]);
+  }
   
   let rowsHTML = '';
   for (const [label, val, pts] of rows) {
@@ -7351,13 +7535,15 @@ function buildRankingPanelHTML(ranking, highlightIdx) {
     const cls = (i === highlightIdx) ? 'rank-row highlight' : 'rank-row';
     const cleared = r.cleared ? ' <span class="cleared-mark">★</span>' : '';
     const playerName = escapeHTML(r.playerName || 'PLAYER');
+    const diffKey = normalizeDifficultyKey(r.difficulty);
+    const diffLabel = escapeHTML(difficultyLabel(diffKey));
     rowsHTML += `
       <div class="${cls}">
         <span class="rank-pos">${i + 1}</span>
         <span class="rank-grade" style="color:${rankColor};">${r.rank}</span>
         <span class="rank-stats">
           <span class="rank-total">${fmtNum(r.total)} <span class="rank-name">${playerName}</span></span>
-          <span class="rank-meta">P${r.phase} · ${fmtTime(r.survivedSec)} · K${r.kills}${cleared}</span>
+          <span class="rank-meta"><span class="rank-difficulty difficulty-${diffKey}">${diffLabel}</span> · P${r.phase} · ${fmtTime(r.survivedSec)} · K${r.kills}${cleared}</span>
         </span>
       </div>`;
   }
@@ -7513,6 +7699,31 @@ function ensureScoreboardCSS() {
       margin-left: 6px;
       letter-spacing: 0.5px;
     }
+    .rank-difficulty {
+      display: inline-block;
+      padding: 1px 6px;
+      border: 1px solid #fff;
+      border-radius: 3px;
+      line-height: 1.3;
+      font-weight: 900;
+      letter-spacing: 0.5px;
+      text-shadow: 0 0 6px rgba(0,0,0,0.7);
+    }
+    .rank-difficulty.difficulty-hero {
+      color: #fff;
+      background: rgba(255,255,255,0.08);
+      box-shadow: 0 0 8px rgba(255,255,255,0.22);
+    }
+    .rank-difficulty.difficulty-normal {
+      color: #ff9d2e;
+      background: rgba(255,140,32,0.14);
+      box-shadow: 0 0 8px rgba(255,140,32,0.3);
+    }
+    .rank-difficulty.difficulty-dystopia {
+      color: #d36cff;
+      background: rgba(160,70,255,0.16);
+      box-shadow: 0 0 8px rgba(190,90,255,0.35);
+    }
     .ranking-source {
       margin-top: 10px;
       text-align: center;
@@ -7611,6 +7822,7 @@ async function injectScoreboard(screenId) {
       phase: result.phase,
       survivedSec: result.survivedSec,
       cleared: result.cleared,
+      difficulty: result.difficulty,
       date: result.date,
       clientRunId: result.clientRunId,
     });
