@@ -60,6 +60,11 @@ const STATE = {
   bossInvulnTimer: 0,   // 보스 등장/처치 시 플레이어 임시 무적 (초)
   spawnFrozen: false,   // 페이즈 후반(2분 경과) — 더 이상 적 리젠 안 함, 남은 적 처치 시 보스 등장
   difficulty: 'normal',
+  // === 히든 보스: 테레사 ===
+  bossFightNoDamage: true,  // 제미네이터 전투 중 피격 없는지 추적
+  hiddenBossActive: false,  // 테레사 전투 진행 중
+  hiddenClear: false,       // 테레사 처치 완료
+  usedCheat: false,         // 치트 사용 시 해당 런은 랭킹 등록 제외
 };
 
 const DIFFICULTY_SETTINGS = {
@@ -768,6 +773,8 @@ let corpseStains = [];    // 적 사망 시 잠시 남는 시체 이미지
 let respawnQueue = [];   // 파괴된 장애물 리스폰 큐 ({x, y, w, h, explosive, timer})
 let holograms = [];      // 리스폰 직전 표시되는 푸른 홀로그램
 let bossEntity = null;
+let hiddenBossEntity = null;  // 히든 보스: 테레사
+let hiddenBossDecoys = [];    // 테레사 분신 (페이즈 4)
 
 // =============================================================
 // PLAYER
@@ -1198,7 +1205,13 @@ class Player {
     
     const spread = this.spreadEff();
     for (let i = 0; i < bulletCount; i++) {
-      const a = this.angle + (Math.random() - 0.5) * spread;
+      // 50%: 25도(±12.5도) 이내 집중탄 / 50%: 45도(±22.5도) 바깥 탄
+      let a;
+      if (Math.random() < 0.5) {
+        a = this.angle + (Math.random() - 0.5) * (25 * Math.PI / 180);
+      } else {
+        a = this.angle + (Math.random() < 0.5 ? 1 : -1) * (22.5 * Math.PI / 180);
+      }
       const speed = this.bulletSpeed * rand(0.85, 1.1);
       const b = new Bullet(this.x, this.y, Math.cos(a) * speed, Math.sin(a) * speed, this.rangeEff(), 1 * dmgMult);
       bullets.push(b);
@@ -1371,6 +1384,8 @@ class Player {
     if (this.invulnTime > 0) return;  // 부활 직후 무적
     
     this.lives--;
+    // 보스전 무피해 추적 (제미네이터 혹은 히든 보스 전투 중 피격 시 기록)
+    if (STATE.bossActive || STATE.hiddenBossActive) STATE.bossFightNoDamage = false;
     sfx('hit');
     STATE.shake = 40;
     STATE.hitstop = 150;
@@ -1385,7 +1400,7 @@ class Player {
       // 부활 슬래시: 3단계 충전 슬래시를 무료로 발동
       const range = this.slashRange[2] * this.slashRangeMult();
       const damage = this.slashDamageEff() * 1.5;  // 부활 슬래시는 더 강함
-      effects.push(new SlashEffect(this.x, this.y, range, 3, damage));
+      effects.push(new SlashEffect(this.x, this.y, range, 3, damage, true));
       
       // 추가 충격파 (모든 적 밀어내기)
       for (const en of enemies) {
@@ -1833,6 +1848,21 @@ class Bullet {
         }
       }
     }
+    // 히든 보스(테레사) 피격
+    if (hiddenBossEntity && !hiddenBossEntity.dead) {
+      if (!this.pierced.includes(hiddenBossEntity) && dist(this, hiddenBossEntity) < hiddenBossEntity.r + this.r) {
+        const pierceProc = player.hasUpgrade('piercing') && Math.random() < 0.5;
+        hiddenBossEntity.takeDamage(this.damage, 'bullet');
+        if (pierceProc) { this.pierced.push(hiddenBossEntity); }
+        else { this.dead = true; return; }
+      }
+    }
+    for (const decoy of hiddenBossDecoys) {
+      if (!decoy.dead && dist(this, decoy) < decoy.r + this.r) {
+        decoy.takeDamage(this.damage, 'bullet');
+        this.dead = true; return;
+      }
+    }
   }
   draw() {
     const s = worldToScreen(this.x, this.y);
@@ -1905,6 +1935,18 @@ class EnemyBullet {
           bossEntity.takeDamage(this.damage);
           this.dead = true;
           return;
+        }
+      }
+      if (hiddenBossEntity && !hiddenBossEntity.dead) {
+        if (dist(this, hiddenBossEntity) < hiddenBossEntity.r + this.r) {
+          hiddenBossEntity.takeDamage(this.damage, 'bullet');
+          this.dead = true; return;
+        }
+      }
+      for (const decoy of hiddenBossDecoys) {
+        if (!decoy.dead && dist(this, decoy) < decoy.r + this.r) {
+          decoy.takeDamage(this.damage, 'bullet');
+          this.dead = true; return;
         }
       }
     } else {
@@ -2038,11 +2080,7 @@ class Enemy {
     // 경계면 밖에 있을 때는 무적
     if (!this.isOnScreen()) return;
     
-    // 어쌔신 회피 슬라이드 중 — 총알에는 무적 (카타나/슬래시는 맞음)
-    if (this.type === 'assassin' && this.dodgeSlideTime > 0 && source === 'bullet') {
-      damageNumbers.push(new DmgNumber(this.x, this.y - 40, 0, '#ff20a0', 'EVADE'));
-      return;
-    }
+    // (어쌔신 총알 회피 없음 — 슬라이딩은 단순 접근용)
     
     const piercesDefense = source === 'piercingBullet';
     const hitsShieldFace = source === 'shieldedBullet';
@@ -2215,55 +2253,38 @@ class Enemy {
     } else if (this.type === 'assassin') {
       this.angle = targetAngle;
       
-      // 회피 슬라이딩 처리
-      // 슬라이딩 중이면 슬라이딩 방향으로만 이동, 그 외 행동 없음
+      // 불규칙 슬라이딩 접근: 빠른 돌진 + 짧은 정지를 반복하며 플레이어에게 접근
       if (this.dodgeSlideTime > 0) {
+        // 슬라이딩 중 — 빠르게 이동
         this.dodgeSlideTime -= dt;
-        const slideSpeed = this.speed * 1.4;
+        const slideSpeed = this.speed * 2.2;
         moveEnemyAroundObstacles(this, this.dodgeSlideDir.x * slideSpeed * dt, this.dodgeSlideDir.y * slideSpeed * dt);
+        // 슬라이드 잔영 파티클 (가끔)
+        if (Math.random() < 0.15) {
+          particles.push(new Particle(this.x, this.y, rand(-40, 40), rand(-40, 40), 0.18, '#ff20a0', 3));
+        }
       } else {
-        if (this.dodgeSlideCd > 0) this.dodgeSlideCd -= dt;
-        // 가까운 위협(플레이어 총알) 감지 → 회피 슬라이드
-        if (this.dodgeSlideCd <= 0 && this.isOnScreen()) {
-          let threat = null;
-          let threatDist = Infinity;
-          for (const b of bullets) {
-            if (b.dead) continue;
-            const dB = dist(this, b);
-            if (dB > 220) continue;  // 220 이내 위협만
-            // 진행 방향 기준 자신 쪽으로 오는 총알인지 (대략적인 dot product)
-            const dx = this.x - b.x;
-            const dy = this.y - b.y;
-            const dotN = (dx * b.dx + dy * b.dy);  // 양수면 자신 쪽으로 진행
-            if (dotN <= 0) continue;
-            // 가장 가까운 위협 선택
-            if (dB < threatDist) { threat = b; threatDist = dB; }
+        if (this.dodgeSlideCd > 0) {
+          // 슬라이드 쿨다운 중 — 느린 불규칙 이동
+          this.dodgeSlideCd -= dt;
+          this.dashTimer -= dt;
+          if (this.dashTimer <= 0) {
+            this.dashAngle = targetAngle + rand(-0.5, 0.5);
+            this.dashTimer = rand(0.1, 0.25);
           }
-          if (threat) {
-            // 총알 진행 방향에 수직(좌/우 무작위)으로 회피
-            const blen = Math.hypot(threat.dx, threat.dy) || 1;
-            const perpX = -threat.dy / blen;
-            const perpY =  threat.dx / blen;
-            const sign = Math.random() < 0.5 ? 1 : -1;
-            this.dodgeSlideDir.x = perpX * sign;
-            this.dodgeSlideDir.y = perpY * sign;
-            this.dodgeSlideTime = rand(0.18, 0.32);
-            this.dodgeSlideCd = rand(0.5, 1.2);
-            // 슬라이드 잔영 파티클
-            for (let i = 0; i < 6; i++) {
-              const a = Math.random() * TAU;
-              particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(20, 80), Math.sin(a) * rand(20, 80), 0.25, '#ff20a0', 3));
-            }
+          moveEnemyAroundObstacles(this, Math.cos(this.dashAngle) * this.speed * 0.45 * dt, Math.sin(this.dashAngle) * this.speed * 0.45 * dt);
+        } else {
+          // 플레이어를 향해 빠른 슬라이딩 시작 (불규칙 각도 편차)
+          const slideAngle = targetAngle + rand(-0.65, 0.65);
+          this.dodgeSlideDir.x = Math.cos(slideAngle);
+          this.dodgeSlideDir.y = Math.sin(slideAngle);
+          this.dodgeSlideTime = rand(0.18, 0.38);
+          this.dodgeSlideCd  = rand(0.12, 0.40);  // 짧은 쿨다운 → 연속 슬라이딩
+          for (let i = 0; i < 5; i++) {
+            const a = Math.random() * TAU;
+            particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(30, 90), Math.sin(a) * rand(30, 90), 0.22, '#ff20a0', 3));
           }
         }
-        
-        // (회피 중이 아닐 때만) 기존 변칙 이동
-        this.dashTimer -= dt;
-        if (this.dashTimer <= 0) {
-          this.dashAngle = targetAngle + rand(-1, 1);
-          this.dashTimer = rand(0.3, 0.7);
-        }
-        moveEnemyAroundObstacles(this, Math.cos(this.dashAngle) * this.speed * dt, Math.sin(this.dashAngle) * this.speed * dt);
       }
       // 공격은 아래 telegraph 시스템에서 처리됨
     } else if (this.type === 'sniper') {
@@ -2797,11 +2818,12 @@ class Boss extends Enemy {
   }
   
   update(dt) {
+    if (this.dead) return;   // 사망 후 업데이트 차단
     if (this.slowTimer > 0) { this.slowTimer -= dt; dt *= 0.5; }
     if (this.cooldown > 0) this.cooldown -= dt;
     this.hitFlash = Math.max(this.hitFlash - dt, 0);
     this.phaseTimer += dt;
-    
+
     // 백규 부활 회복 페이즈: 정지 상태로 무적, HP 게이지가 차오르며 회복
     if (this.level === 1 && this.reviving) {
       this.reviveTimer += dt;
@@ -4279,6 +4301,772 @@ class Boss extends Enemy {
 }
 
 // =============================================================
+// HIDDEN BOSS: 테레사
+// =============================================================
+
+// ★ 테레사 체력 — 이 값만 바꾸면 됩니다
+const TERESA_MAX_HP = 10;
+
+class HiddenBoss {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.r = 28; this.hitR = 16;
+    this.hp = TERESA_MAX_HP; this.maxHp = TERESA_MAX_HP;
+    this.dead = false; this.boss = true;
+    this.name = '테레사';
+    this.color = '#e060ff';
+    this.angle = 0;
+    this.speed = 520;   // 플레이어(430)보다 살짝 빠름
+    this.hitFlash = 0; this.invulnTime = 0;
+
+    // 페이즈 관리 (1~4)
+    this.phase = 1; this.phaseTimer = 0;
+    this.subState = 'idle';
+
+    // 페이즈 1: 샷건 패턴
+    this.p1CycleCount = 0;    // 반복 횟수 (3번 후 페이즈 2)
+    this.p1Cooldown = 1.0;    // 초기 딜레이
+    this.p1SlideDir = { x: 0, y: 0 };
+    this.p1SlideTime = 0;
+
+    // 페이즈 2: 카타나 패턴
+    this.p2ChargeTime = 0;
+    this.p2ChargeDuration = 1.0;
+    this.p2SlashActive = false;
+    this.p2SlashTimer = 0;
+    this.p2SlashHitPlayer = false;
+    this.p2SlideCd = 0;
+    this.p2ParryCd = 0;
+    this.p2CycleCount = 0;    // 카타나 횟수 (2번 후 페이즈 3)
+
+    // 페이즈 3: 광란 상태
+    this.p3Duration = 6.0;    // ★ 6초 지속
+    this.p3Timer = 0;
+    this.p3Recovering = false;
+    this.p3RecoverTimer = 0;
+    this.p3RecoverDuration = 2.0;
+    this.p3SlashCd = 0;
+    this.afterimages = [];
+    this.afterimageCd = 0;
+
+    // 페이즈 4: 분신
+    this.phase4Entered = false;
+
+    // 공용 충돌 쿨다운
+    this.clashCd = 0;
+    this.facingLeft = false;
+
+    // 페이즈 3 경험 여부 (이후 카타나 패링 활성화)
+    this.hasBeenPhase3 = false;
+    // 1500px 이상일 때 접근 슬라이딩 쿨다운
+    this.approachSlideCd = 0;
+  }
+
+  isOnScreen() {
+    const s = worldToScreen(this.x, this.y);
+    return s.x > -200 && s.x < W + 200 && s.y > -200 && s.y < H + 200;
+  }
+
+  takeDamage(d, source) {
+    if (this.dead) return;
+    if (source === 'explosion') {
+      damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#e060ff', 'IMMUNE'));
+      return;
+    }
+    if (this.invulnTime > 0) {
+      damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#e060ff', 'INVULN'));
+      return;
+    }
+    // 슬라이딩 중에는 총알 무적 (페이즈 1/2의 슬라이드)
+    if (this.subState === 'sliding' && source === 'bullet' && this.phase !== 3) {
+      damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#e060ff', 'EVADED'));
+      return;
+    }
+    // 페이즈 3 경험 후: 배터리 충전 중이 아니면 모든 공격 회피
+    if (this.hasBeenPhase3) {
+      const playerCharging = player && MOUSE.rightDown && player.slashCooldown <= 0;
+      if (!playerCharging) {
+        if (source === 'slash') {
+          this._doClash();
+          damageNumbers.push(new DmgNumber(this.x, this.y - 40, 0, '#e060ff', 'PARRY'));
+        } else {
+          if (this.subState !== 'sliding') this._startSlide(false);
+          damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#e060ff', 'EVADED'));
+        }
+        return;
+      }
+      // 충전 중이더라도 카타나 공격은 여전히 패링 (배터리 있을 때)
+      if (source === 'slash' && player.battery > 0) {
+        this._doClash();
+        damageNumbers.push(new DmgNumber(this.x, this.y - 40, 0, '#e060ff', 'PARRY'));
+        return;
+      }
+    }
+    this.hp -= d;
+    queueDamageNumber(this, d, -50);
+    this.hitFlash = 0.1;
+    sfx('hit');
+
+    if (this.hp <= 0) {
+      this.die();
+    } else if (this.phase === 3 && !this.p3Recovering) {
+      // 페이즈 3 중 피격: 일시 무적 + 페이즈 1로 복귀
+      this.invulnTime = 1.5;
+      this.enterPhase(1);
+      showFlash('테레사: ─!', '#e060ff');
+      STATE.shake = Math.max(STATE.shake, 20);
+    } else if (!this.phase4Entered && this.hp <= 1) {
+      // HP 1: 페이즈 4 진입
+      this.hp = 1;
+      this.phase4Entered = true;
+      this.enterPhase(4);
+    }
+  }
+
+  die() {
+    this.dead = true;
+    sfx('explode'); sfx('death');
+    STATE.bossKills++;
+    STATE.hiddenBossActive = false;
+    STATE.hiddenClear = true;
+
+    for (let i = 0; i < 80; i++) {
+      const a = Math.random() * TAU;
+      particles.push(new Particle(
+        this.x, this.y,
+        Math.cos(a) * rand(100, 500), Math.sin(a) * rand(100, 500),
+        1.5, ['#e060ff', '#ffffff', '#ff80ff'][i % 3], 10
+      ));
+    }
+    effects.push(new Explosion(this.x, this.y, 400, 0));
+    STATE.shake = 60; STATE.hitstop = 250;
+
+    enemyBullets = []; bullets = [];
+    if (player) player.invulnTime = Math.max(player.invulnTime, 2.5);
+
+    for (const decoy of hiddenBossDecoys) decoy.dead = true;
+
+    STATE.ended = true;
+    setTimeout(() => {
+      document.getElementById('endingScreen').classList.add('show');
+    }, 3000);
+  }
+
+  enterPhase(n) {
+    this.phase = n; this.phaseTimer = 0; this.subState = 'idle';
+    this.p1CycleCount = 0; this.p1Cooldown = 0.8; this.p1SlideTime = 0;
+    this.p2ChargeTime = 0; this.p2SlashActive = false; this.p2CycleCount = 0;
+    this.p3Timer = 0; this.p3Recovering = false; this.afterimages = [];
+
+    if (n === 4) {
+      this._spawnDecoys();
+      showFlash('테레사: ...아직이야.', '#e060ff');
+      STATE.shake = 40;
+      for (let i = 0; i < 40; i++) {
+        const a = Math.random() * TAU;
+        particles.push(new Particle(this.x, this.y, Math.cos(a)*rand(100,350), Math.sin(a)*rand(100,350), 0.8, '#e060ff', 7));
+      }
+    }
+  }
+
+  _spawnDecoys() {
+    hiddenBossDecoys = [];
+    for (let i = 0; i < 2; i++) {
+      const a = (i + 1) * TAU / 3 + this.angle;
+      const dx = clamp(this.x + Math.cos(a) * 250, 100, WORLD.w - 100);
+      const dy = clamp(this.y + Math.sin(a) * 250, 100, WORLD.h - 100);
+      hiddenBossDecoys.push(new HiddenBossDecoy(dx, dy));
+    }
+  }
+
+  _fireP1Shotgun() {
+    // 최대 12발, 플레이어 탄속(1200)의 2/3, 장애물 통과
+    const aimAngle = player ? angleTo(this, player) : this.angle;
+    const spread = Math.PI / 4;
+    const totalBullets = 12;
+    const bulletSpeed = 800;
+    for (let i = 0; i < totalBullets; i++) {
+      const t = i / (totalBullets - 1);
+      const a = aimAngle - spread / 2 + spread * t + rand(-0.04, 0.04);
+      enemyBullets.push(new EnemyBullet(
+        this.x, this.y,
+        Math.cos(a) * bulletSpeed * rand(0.85, 1.1),
+        Math.sin(a) * bulletSpeed * rand(0.85, 1.1),
+        { r: 7, damage: 1, color: '#d080ff', life: 4, piercing: true }
+      ));
+    }
+    sfx('shoot');
+    STATE.shake = Math.max(STATE.shake, 8);
+  }
+
+  _startSlide(towardPlayer) {
+    let a;
+    if (towardPlayer) {
+      a = angleTo(this, player);
+    } else {
+      // 수직 방향 슬라이딩
+      const toPlayer = angleTo(this, player);
+      a = toPlayer + (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2);
+    }
+    this.p1SlideDir = { x: Math.cos(a), y: Math.sin(a) };
+    this.p1SlideTime = towardPlayer ? 0.35 : 0.4;
+    this.subState = 'sliding';
+    sfx('slide');
+  }
+
+  _tryParry() {
+    if (this.p2ParryCd > 0) return;
+    if (this.phase === 3 && !this.p3Recovering) return; // 페이즈 3 중에는 패링 안 함
+
+    // 일반 플레이어 총알 패링 (화면경직은 첫 번째 탄환에만 1회)
+    let parryHitstopDone = false;
+    for (const b of bullets) {
+      if (b.dead) continue;
+      if (dist(this, b) < 130) {
+        b.dead = true;
+        this.p2ParryCd = 0.4;
+        sfx('parry');
+        for (let i = 0; i < 8; i++) {
+          const a = Math.random() * TAU;
+          enemyBullets.push(new EnemyBullet(
+            this.x, this.y,
+            Math.cos(a) * rand(300, 600), Math.sin(a) * rand(300, 600),
+            { r: 7, damage: 1, color: '#d080ff', life: 3, piercing: true }
+          ));
+        }
+        if (!parryHitstopDone) {
+          STATE.shake = Math.max(STATE.shake, 5);
+          STATE.hitstop = Math.max(STATE.hitstop, 60);
+          parryHitstopDone = true;
+        }
+        damageNumbers.push(new DmgNumber(this.x, this.y - 40, 0, '#e060ff', 'PARRY'));
+        return;  // 한 번에 하나씩 처리
+      }
+    }
+    // 패링된 탄환(fromPlayer=true)이 다시 날아오면 이동으로 회피
+    for (const eb of enemyBullets) {
+      if (eb.dead || !eb.fromPlayer) continue;
+      if (dist(this, eb) < 100) {
+        // 탄환 방향 수직으로 이동해서 피함
+        const bulletAngle = Math.atan2(eb.dy, eb.dx);
+        const evadeA = bulletAngle + (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2);
+        this.x += Math.cos(evadeA) * this.speed * 0.5;
+        this.y += Math.sin(evadeA) * this.speed * 0.5;
+        this.x = clamp(this.x, this.r, WORLD.w - this.r);
+        this.y = clamp(this.y, this.r, WORLD.h - this.r);
+        damageNumbers.push(new DmgNumber(this.x, this.y - 40, 0, '#e060ff', 'EVADE'));
+        return;
+      }
+    }
+  }
+
+  // 플레이어와 카타나 충돌 처리 (공용)
+  _doClash() {
+    if (this.clashCd > 0) return;
+    this.clashCd = 0.6;
+    const a = angleTo(this, player);
+    const knock = 300;
+    this.x -= Math.cos(a) * knock; this.y -= Math.sin(a) * knock;
+    if (player) {
+      player.x += Math.cos(a) * knock; player.y += Math.sin(a) * knock;
+      player.x = clamp(player.x, player.r, WORLD.w - player.r);
+      player.y = clamp(player.y, player.r, WORLD.h - player.r);
+    }
+    this.x = clamp(this.x, this.r, WORLD.w - this.r);
+    this.y = clamp(this.y, this.r, WORLD.h - this.r);
+    sfx('parry');
+    STATE.shake = Math.max(STATE.shake, 20);
+    STATE.hitstop = Math.max(STATE.hitstop, 200);
+    damageNumbers.push(new DmgNumber(this.x, this.y - 50, 0, '#ffffff', 'CLASH!'));
+    showFlash('CLASH!', '#ffffff');
+    if (this.phase === 3 && !this.p3Recovering) {
+      this._endPhase3ByParry();
+    }
+  }
+
+  _endPhase3ByParry() {
+    this.p3Recovering = true;
+    this.p3RecoverTimer = 0;
+    this.p2SlashActive = false;
+    this.p2SlashTimer = 0;
+    this.p2ChargeTime = 0;
+    this.subState = 'recovering';
+    this.afterimages = [];
+    this.hasBeenPhase3 = true;
+    showFlash('PARRY BREAK!', '#ffffff');
+  }
+
+  _startKatanaCharge(stage, duration) {
+    this.p2ChargeTime = 0;
+    this.p2ChargeDuration = duration;
+    this.p2SlashStage = stage;
+    this.p2SlashHitPlayer = false;
+    this.subState = 'charging';
+    sfx('charge');
+  }
+
+  _releaseKatanaSlash(stage) {
+    const slashStage = stage !== undefined ? stage : (this.p2SlashStage || 1);
+    const range = [200, 270, 382, 494][slashStage] || 200;
+    this.p2SlashActive = true;
+    this.p2SlashTimer = 0.32;
+    this.p2SlashHitPlayer = false;
+    this.subState = 'swinging';
+    effects.push(new TeresaSlashEffect(this.x, this.y, range, slashStage, this.angle));
+    sfx('slash');
+    this._doKatanaHit(slashStage);
+  }
+
+  // 카타나 근접 공격 (플레이어 범위 내)
+  _doKatanaHit(stage) {
+    if (!player || player.dead) return;
+    const range = [200, 270, 382, 494][stage] || 200;
+    if (dist(this, player) < range + player.hitR) {
+      // 플레이어가 같이 카타나를 휘두르고 있으면 충돌
+      if ((player.slashAnimTime > 0) && this.clashCd <= 0) {
+        this._doClash();
+        return;
+      }
+      if (!this.p2SlashHitPlayer) {
+        this.p2SlashHitPlayer = true;
+        player.takeDamage('melee');
+      }
+    }
+  }
+
+  update(dt) {
+    if (this.dead) return;
+    this.hitFlash = Math.max(0, this.hitFlash - dt);
+    this.invulnTime = Math.max(0, this.invulnTime - dt);
+    this.phaseTimer += dt;
+    this.clashCd = Math.max(0, this.clashCd - dt);
+    this.approachSlideCd = Math.max(0, this.approachSlideCd - dt);
+
+    // 좌우 반전만 (회전 없음) — 플레이어가 왼쪽에 있으면 반전
+    if (player && !player.dead) {
+      this.facingLeft = player.x < this.x;
+      // 총알 방향 계산용으로만 angle 갱신
+      this.angle = angleTo(this, player);
+    }
+
+    // 1500px 이상 떨어지면 공격 중단하고 슬라이딩으로 접근
+    if (player && !player.dead && this.subState !== 'sliding' && this.approachSlideCd <= 0) {
+      if (dist(this, player) > 1500) {
+        this._startSlide(true);
+        this.approachSlideCd = 1.0;
+        return;  // 이번 프레임은 접근만
+      }
+    }
+
+    switch (this.phase) {
+      case 1: this._updatePhase1(dt); break;
+      case 2: this._updatePhase2(dt); break;
+      case 3: this._updatePhase3(dt); break;
+      case 4: this._updatePhase4(dt); break;
+    }
+
+    this.x = clamp(this.x, this.r, WORLD.w - this.r);
+    this.y = clamp(this.y, this.r, WORLD.h - this.r);
+  }
+
+  _updatePhase1(dt) {
+    if (!player || player.dead) return;
+    if (this.p1Cooldown > 0) { this.p1Cooldown -= dt; return; }
+
+    if (this.subState === 'idle') {
+      this._fireP1Shotgun();
+      this.subState = 'postShot';
+      this.p1Cooldown = 0.3;
+    } else if (this.subState === 'postShot') {
+      this._startSlide(false);   // 수직 슬라이딩
+    } else if (this.subState === 'sliding') {
+      if (this.p1SlideTime > 0) {
+        this.p1SlideTime -= dt;
+        this.x += this.p1SlideDir.x * this.speed * 1.2 * dt;
+        this.y += this.p1SlideDir.y * this.speed * 1.2 * dt;
+      } else {
+        this.p1CycleCount++;
+        if (this.p1CycleCount >= 3) {
+          this.enterPhase(2);
+        } else {
+          this.subState = 'idle';
+          this.p1Cooldown = 0.6;
+        }
+      }
+    }
+  }
+
+  _updatePhase2(dt) {
+    if (!player || player.dead) return;
+    if (this.p2ParryCd > 0) this.p2ParryCd -= dt;
+    if (this.p2SlideCd > 0) this.p2SlideCd -= dt;
+    this._tryParry();
+
+    const distToPlayer = dist(this, player);
+
+    if (this.subState === 'idle') {
+      if (distToPlayer > 350 && this.p2SlideCd <= 0) {
+        // 너무 멀면 슬라이딩으로 추격
+        this._startSlide(true);
+        this.p2SlideCd = 1.5;
+      } else {
+        // 기 모으기
+        this._startKatanaCharge(3, 1.0);
+      }
+    } else if (this.subState === 'sliding') {
+      if (this.p1SlideTime > 0) {
+        this.p1SlideTime -= dt;
+        this.x += this.p1SlideDir.x * this.speed * dt;
+        this.y += this.p1SlideDir.y * this.speed * dt;
+      } else {
+        this.subState = 'idle';
+      }
+    } else if (this.subState === 'charging') {
+      this.p2ChargeTime += dt;
+      if (this.p2ChargeTime >= this.p2ChargeDuration) {
+        // 3단계 카타나 휘두르기
+        this._releaseKatanaSlash(3);
+      }
+    } else if (this.subState === 'swinging') {
+      this.p2SlashTimer -= dt;
+      if (this.p2SlashTimer <= 0) {
+        this.p2SlashActive = false;
+        this.subState = 'idle';
+        this.p2CycleCount++;
+        this.p2ChargeTime = 0;
+        if (this.p2CycleCount >= 2) this.enterPhase(3);
+      }
+    }
+  }
+
+  _updatePhase3(dt) {
+    if (!player || player.dead) return;
+
+    if (this.p3Recovering) {
+      // 회복 중: 느리게 움직임, 패링/회피 불가
+      this.p3RecoverTimer += dt;
+      if (this.p3RecoverTimer >= this.p3RecoverDuration) {
+        this.p3Recovering = false;
+        this.enterPhase(1);
+      } else {
+        // 느린 접근
+        const a = angleTo(this, player);
+        const slowFactor = 0.25 * (1 - this.p3RecoverTimer / this.p3RecoverDuration);
+        this.x += Math.cos(a) * this.speed * slowFactor * dt;
+        this.y += Math.sin(a) * this.speed * slowFactor * dt;
+      }
+      return;
+    }
+
+    this.p3Timer += dt;
+    this.p3SlashCd = Math.max(0, this.p3SlashCd - dt);
+
+    // 잔상 생성
+    this.afterimageCd -= dt;
+    if (this.afterimageCd <= 0) {
+      this.afterimageCd = 0.05;
+      this.afterimages.push({ x: this.x, y: this.y, facingLeft: this.facingLeft, life: 0.3, life0: 0.3 });
+    }
+    for (const af of this.afterimages) af.life -= dt;
+    this.afterimages = this.afterimages.filter(af => af.life > 0);
+
+    // 총알 피하기 (슬라이딩 대신 이동으로 회피)
+    let evading = false;
+    for (const b of bullets) {
+      if (b.dead) continue;
+      if (dist(this, b) < 160) {
+        const bulletAngle = Math.atan2(b.dy, b.dx);
+        const evadeAngle = bulletAngle + (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2);
+        this.x += Math.cos(evadeAngle) * this.speed * 2 * dt;
+        this.y += Math.sin(evadeAngle) * this.speed * 2 * dt;
+        evading = true;
+        break;
+      }
+    }
+    if (this.subState === 'charging') {
+      this.p2ChargeTime += dt;
+      if (this.p2ChargeTime >= this.p2ChargeDuration) {
+        this._releaseKatanaSlash(1);
+        this.p3SlashCd = 0.65;
+      }
+    } else if (this.subState === 'swinging') {
+      this.p2SlashTimer -= dt;
+      this._doKatanaHit(1);
+      if (this.p2SlashTimer <= 0) {
+        this.p2SlashActive = false;
+        this.subState = 'idle';
+      }
+    } else if (!evading) {
+      // 접근해서 반드시 기를 모은 뒤 카타나를 휘두른다.
+      const a = angleTo(this, player);
+      const d = dist(this, player);
+      if (d > 170 + player.hitR) {
+        this.x += Math.cos(a) * this.speed * 2 * dt;
+        this.y += Math.sin(a) * this.speed * 2 * dt;
+      } else if (this.p3SlashCd <= 0) {
+        this._startKatanaCharge(1, 0.35);
+      }
+    }
+
+    // 6초 후 페이즈 3 종료 → 느려지는 회복 상태
+    if (this.p3Timer >= this.p3Duration) {
+      this.p3Recovering = true;
+      this.p3RecoverTimer = 0;
+      this.afterimages = [];
+      this.p2SlashActive = false;
+      this.p2ChargeTime = 0;
+      this.hasBeenPhase3 = true;  // 페이즈 3 경험 기록
+      showFlash('테레사: ...후.', '#e060ff');
+    }
+  }
+
+  _updatePhase4(dt) {
+    // 페이즈 1과 동일 패턴 (분신들은 각자 별도로 동작)
+    this._updatePhase1(dt);
+  }
+
+  draw() {
+    if (this.dead) return;
+    const s = worldToScreen(this.x, this.y);
+    if (s.x < -100 || s.x > W + 100 || s.y < -100 || s.y > H + 100) return;
+
+    // 페이즈 3 잔상 그리기
+    if (this.phase === 3 && !this.p3Recovering) {
+      const drawSize = this.r * 4;
+      for (const af of this.afterimages) {
+        const as = worldToScreen(af.x, af.y);
+        ctx.save();
+        ctx.globalAlpha = (af.life / af.life0) * 0.35;
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = '#e060ff';
+        ctx.filter = 'hue-rotate(270deg) saturate(3) brightness(1.5)';
+        if (af.facingLeft) {
+          ctx.translate(as.x, as.y);
+          ctx.scale(-1, 1);
+          drawAnimFrame && drawAnimFrame('idle', 0, 0, 0, drawSize, false);
+        } else {
+          drawAnimFrame && drawAnimFrame('idle', 0, as.x, as.y, drawSize, false);
+        }
+        ctx.filter = 'none';
+        ctx.restore();
+      }
+    }
+
+    ctx.save();
+    ctx.translate(s.x, s.y);
+
+    // 기 모으기 시각효과: 플레이어 카타나 차지와 같은 링/파티클
+    if (this.subState === 'charging') {
+      const chargeStage = this.p2SlashStage || (this.phase === 2 ? 3 : 1);
+      const colors = ['#ffffff', '#ffcc00', '#ffaa00'];
+      const color = colors[Math.max(0, Math.min(2, chargeStage - 1))];
+      ctx.shadowBlur = 30;
+      ctx.shadowColor = color;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3 + chargeStage;
+      const radius = 60 + chargeStage * 16 + Math.sin(STATE.realTime * 0.012) * 6;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, 0, TAU);
+      ctx.stroke();
+      if (Math.random() < 0.5) {
+        const a = Math.random() * TAU;
+        particles.push(new Particle(this.x + Math.cos(a) * radius, this.y + Math.sin(a) * radius, Math.cos(a) * 50, Math.sin(a) * 50, 0.5, color, 4));
+      }
+    }
+
+    // 회전 없이 좌우 반전만
+    if (this.facingLeft) ctx.scale(-1, 1);
+
+    // 히트플래시
+    if (this.hitFlash > 0) ctx.filter = 'brightness(3)';
+
+    // 1순위: boss_teresa.png (커스텀 이미지 추가 시 자동 사용)
+    // 2순위: 플레이어 idle 애니메이션 스프라이트 (기존 파일 재활용)
+    // 3순위: 원형 폴백
+    const drawSize = this.r * 4;
+    const drew = drawEntityImage('boss_teresa', 0, 0, null, false)
+      || (typeof drawAnimFrame === 'function' && drawAnimFrame('idle', 0, 0, 0, drawSize, false));
+
+    ctx.filter = 'none';
+
+    if (!drew) {
+      ctx.fillStyle = this.hitFlash > 0 ? '#fff' : this.color;
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = this.color;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = this.p2SlashActive ? '#ffffff' : '#cc88ff';
+      ctx.fillRect(this.r * 0.3, -3, this.r + 14, 6);
+      ctx.fillStyle = '#220022';
+      ctx.beginPath();
+      ctx.arc(this.r * 0.45, -6, 3, 0, TAU);
+      ctx.arc(this.r * 0.45, 6, 3, 0, TAU);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+}
+
+// 테레사 분신 (페이즈 4)
+class HiddenBossDecoy {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.r = 28; this.hitR = 16;
+    this.hp = 1; this.maxHp = 1;
+    this.dead = false;
+    this.name = '테레사(?)';
+    this.color = '#e060ff';
+    this.angle = 0;
+    this.speed = 520;
+    this.hitFlash = 0;
+    // 분신도 같은 패턴으로 움직임
+    this.subState = 'idle';
+    this.p1CycleCount = 0; this.p1Cooldown = rand(0.5, 1.5);
+    this.p1SlideDir = { x: 0, y: 0 }; this.p1SlideTime = 0;
+    this.facingLeft = false;
+  }
+
+  takeDamage(d, source) {
+    if (this.dead) return;
+    if (source === 'explosion') return;
+    if (this.subState === 'sliding' && source === 'bullet') {
+      damageNumbers.push(new DmgNumber(this.x, this.y - 40, 0, '#e060ff', 'EVADED'));
+      return;
+    }
+    this.dead = true;
+    sfx('death');
+    STATE.shake = Math.max(STATE.shake, 20);
+    for (let i = 0; i < 25; i++) {
+      const a = Math.random() * TAU;
+      particles.push(new Particle(this.x, this.y, Math.cos(a)*rand(80,300), Math.sin(a)*rand(80,300), 0.6, '#e060ff', 6));
+    }
+    effects.push(new Explosion(this.x, this.y, 100, 0));
+    damageNumbers.push(new DmgNumber(this.x, this.y - 60, 0, '#e060ff', '분신!'));
+  }
+
+  update(dt) {
+    if (this.dead) return;
+    this.hitFlash = Math.max(0, this.hitFlash - dt);
+    if (!player || player.dead) return;
+
+    // 좌우 반전만 (회전 없음)
+    this.facingLeft = player.x < this.x;
+    this.angle = angleTo(this, player);  // 총알 방향용
+
+    // 1500px 이상이면 공격 안 하고 접근
+    if (dist(this, player) > 1500 && this.subState !== 'sliding') {
+      const a = angleTo(this, player);
+      this.p1SlideDir = { x: Math.cos(a), y: Math.sin(a) };
+      this.p1SlideTime = 0.4;
+      this.subState = 'sliding';
+    }
+
+    // 페이즈 1과 동일한 샷건+슬라이드 패턴
+    if (this.p1Cooldown > 0) { this.p1Cooldown -= dt; return; }
+    if (this.subState === 'idle') {
+      this._fireDecoyGun();
+      this.subState = 'postShot'; this.p1Cooldown = 0.3;
+    } else if (this.subState === 'postShot') {
+      const toPlayer = angleTo(this, player);
+      const perp = toPlayer + (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2);
+      this.p1SlideDir = { x: Math.cos(perp), y: Math.sin(perp) };
+      this.p1SlideTime = 0.4;
+      this.subState = 'sliding';
+    } else if (this.subState === 'sliding') {
+      if (this.p1SlideTime > 0) {
+        this.p1SlideTime -= dt;
+        this.x += this.p1SlideDir.x * this.speed * 1.2 * dt;
+        this.y += this.p1SlideDir.y * this.speed * 1.2 * dt;
+      } else {
+        this.p1CycleCount++;
+        this.subState = 'idle';
+        this.p1Cooldown = 0.7;
+        if (this.p1CycleCount >= 3) this.p1CycleCount = 0;
+      }
+    }
+    this.x = clamp(this.x, this.r, WORLD.w - this.r);
+    this.y = clamp(this.y, this.r, WORLD.h - this.r);
+  }
+
+  _fireDecoyGun() {
+    const aimAngle = player ? angleTo(this, player) : this.angle;
+    const spread = Math.PI / 4;
+    const total = 12;
+    const spd = 800;  // 테레사와 동일 탄속, 장애물 통과
+    for (let i = 0; i < total; i++) {
+      const t = i / (total - 1);
+      const a = aimAngle - spread / 2 + spread * t + rand(-0.04, 0.04);
+      enemyBullets.push(new EnemyBullet(
+        this.x, this.y,
+        Math.cos(a) * spd * rand(0.85, 1.1), Math.sin(a) * spd * rand(0.85, 1.1),
+        { r: 7, damage: 1, color: '#d080ff', life: 4, piercing: true }
+      ));
+    }
+    sfx('shoot');
+  }
+
+  draw() {
+    if (this.dead) return;
+    const s = worldToScreen(this.x, this.y);
+    if (s.x < -100 || s.x > W + 100 || s.y < -100 || s.y > H + 100) return;
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    // 회전 없이 좌우 반전만
+    if (this.facingLeft) ctx.scale(-1, 1);
+    if (this.hitFlash > 0) ctx.filter = 'brightness(3)';
+    const drawSize = this.r * 4;
+    const drew = drawEntityImage('boss_teresa_decoy', 0, 0, null, false)
+      || drawEntityImage('boss_teresa', 0, 0, null, false)
+      || (typeof drawAnimFrame === 'function' && drawAnimFrame('idle', 0, 0, 0, drawSize, false));
+    ctx.filter = 'none';
+    if (!drew) {
+      ctx.fillStyle = this.hitFlash > 0 ? '#fff' : '#c040ee';
+      ctx.shadowBlur = 15;
+      ctx.shadowColor = '#c040ee';
+      ctx.beginPath();
+      ctx.arc(0, 0, this.r, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = '#aa66ff';
+      ctx.fillRect(this.r * 0.3, -3, this.r + 14, 6);
+    }
+    ctx.restore();
+  }
+}
+
+// 히든 보스 소환 함수
+function _spawnHiddenBoss() {
+  const lines = BOSS_CUTSCENES['hidden'];
+  STATE.hiddenBossActive = true;
+  STATE.bossActive = true;   // 일반 보스 스폰 방지
+
+  const doSpawn = () => {
+    const w = document.getElementById('bossWarning');
+    w.style.display = 'flex';
+    setTimeout(() => {
+      w.style.display = 'none';
+      if (!STATE.gameOver && !STATE.ended) {
+        const a = Math.random() * TAU;
+        const dst = Math.max(W, H) * 0.5 + 150;
+        const bx = clamp(player.x + Math.cos(a) * dst, 100, WORLD.w - 100);
+        const by = clamp(player.y + Math.sin(a) * dst, 100, WORLD.h - 100);
+        hiddenBossEntity = new HiddenBoss(bx, by);
+        enemyBullets = []; bullets = [];
+        if (player) player.invulnTime = Math.max(player.invulnTime, 2.5);
+        showFlash('테레사', '#e060ff');
+      }
+    }, 2500);
+  };
+
+  if (lines && lines.length && !STATE.inBossCutscene) {
+    playBossCutscene('hidden', doSpawn);
+  } else {
+    doSpawn();
+  }
+}
+
+// =============================================================
 // PARTICLES
 // =============================================================
 class Particle {
@@ -4474,53 +5262,100 @@ class Obstacle {
     if (this.destructible && !explosive) this.hp = 8;
     this.explosive = explosive;
     this.dead = false;
+    // 폭발 카운트다운 (피격 후 깜빡이다가 터짐)
+    this.blinking = false;
+    this.blinkOn = false;
+    this.blinkTimer = 0;
+    this.explodeTimer = 0;
   }
+
+  // 폭발물 카운트다운 업데이트 (메인 루프에서 호출)
+  update(dt) {
+    if (!this.blinking) return;
+    this.explodeTimer -= dt;
+    // 남은 시간에 따라 점점 빨라지는 깜빡임 (2초 → 0.04초 주기)
+    const blinkInterval = Math.max(0.04, 0.28 * (this.explodeTimer / 2.0));
+    this.blinkTimer -= dt;
+    if (this.blinkTimer <= 0) {
+      this.blinkTimer = blinkInterval;
+      this.blinkOn = !this.blinkOn;
+    }
+    if (this.explodeTimer <= 0) {
+      this._doExplode();
+    }
+  }
+
+  // 실제 폭발 처리
+  _doExplode() {
+    this.dead = true;
+    respawnQueue.push({
+      x: this.x, y: this.y,
+      w: this.w, h: this.h,
+      explosive: this.explosive,
+      destructible: true,
+      timer: 60,
+    });
+    effects.push(new Explosion(this.x, this.y, 260, 5));
+    sfx('explode');
+    for (const en of enemies) {
+      if (en.dead) continue;
+      if (dist(this, en) < 260) en.takeDamage(5);
+    }
+    if (bossEntity && !bossEntity.dead && dist(this, bossEntity) < 260) bossEntity.takeDamage(5);
+    if (hiddenBossEntity && !hiddenBossEntity.dead && dist(this, hiddenBossEntity) < 260) hiddenBossEntity.takeDamage(5, 'explosion');
+    if (player && !player.rolling && dist(this, player) < 200) player.takeDamage();
+    STATE.shake = Math.max(STATE.shake, 25);
+    if (Math.random() < 0.1) {
+      const types = ['ammo', 'btc', 'battery'];
+      pickups.push(new Pickup(this.x, this.y, types[Math.floor(Math.random() * types.length)]));
+    }
+  }
+
   takeDamage(d) {
     if (!this.destructible) return;
+    if (this.blinking) return;  // 이미 카운트다운 중
     this.hp -= d;
     if (this.hp <= 0) {
+      if (this.explosive) {
+        // 즉시 폭발 대신 2초 깜빡임 카운트다운 시작
+        this.hp = 0;
+        this.blinking = true;
+        this.blinkOn = true;
+        this.explodeTimer = 2.0;
+        this.blinkTimer = 0.28;
+        return;
+      }
+      // 비폭발 장애물: 즉시 처리
       this.dead = true;
-      // 60초 후 리스폰 큐에 추가 (이 위치에 새 장애물이 다시 생김)
       respawnQueue.push({
         x: this.x, y: this.y,
         w: this.w, h: this.h,
-        explosive: this.explosive,
-        destructible: true,  // 리스폰된 건 항상 destructible
-        timer: 60,           // 60초 후 홀로그램 시작
+        explosive: false,
+        destructible: true,
+        timer: 60,
       });
-      
-      if (this.explosive) {
-        effects.push(new Explosion(this.x, this.y, 260, 5));
-        sfx('explode');
-        for (const en of enemies) {
-          if (en.dead) continue;
-          if (dist(this, en) < 260) en.takeDamage(5);
-        }
-        if (bossEntity && !bossEntity.dead && dist(this, bossEntity) < 260) bossEntity.takeDamage(5);
-        if (player && !player.rolling && dist(this, player) < 200) player.takeDamage();
-        STATE.shake = Math.max(STATE.shake, 25);
-      } else {
-        for (let i = 0; i < 15; i++) {
-          const a = Math.random() * TAU;
-          particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(80, 200), Math.sin(a) * rand(80, 200), 0.6, '#666', 6));
-        }
+      for (let i = 0; i < 15; i++) {
+        const a = Math.random() * TAU;
+        particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(80, 200), Math.sin(a) * rand(80, 200), 0.6, '#666', 6));
       }
-      
-      // 10% 확률로 픽업 드롭 (탄박스/BTC/배터리 중 하나)
       if (Math.random() < 0.1) {
         const types = ['ammo', 'btc', 'battery'];
-        const t = types[Math.floor(Math.random() * types.length)];
-        pickups.push(new Pickup(this.x, this.y, t));
+        pickups.push(new Pickup(this.x, this.y, types[Math.floor(Math.random() * types.length)]));
       }
     }
   }
   draw() {
     const s = worldToScreen(this.x, this.y);
     if (s.x + this.w < 0 || s.x - this.w > W || s.y + this.h < 0 || s.y - this.h > H) return;
-    
+
+    // 깜빡임 중: 밝은 빨강 오버레이
+    const flashOn = this.blinking && this.blinkOn;
+    if (flashOn) ctx.filter = 'brightness(3) saturate(2)';
+
     // Image override
     const imgKey = this.explosive ? 'obstacle_explosive' : 'obstacle_wall';
     if (drawEntityImageRect(imgKey, s.x, s.y, this.w, this.h)) {
+      ctx.filter = 'none';
       // HP bar는 그대로 그림
       if (this.destructible && !this.explosive && this.hp < this.maxHp) {
         ctx.fillStyle = 'rgba(0,0,0,0.7)';
@@ -4530,13 +5365,14 @@ class Obstacle {
       }
       return;
     }
-    
+
+    ctx.filter = 'none';
     ctx.save();
     if (this.explosive) {
-      ctx.fillStyle = '#330000';
-      ctx.strokeStyle = '#ff0000';
-      ctx.shadowBlur = 12;
-      ctx.shadowColor = '#ff0000';
+      ctx.fillStyle = flashOn ? '#ff6600' : '#330000';
+      ctx.strokeStyle = flashOn ? '#ffff00' : '#ff0000';
+      ctx.shadowBlur = flashOn ? 24 : 12;
+      ctx.shadowColor = flashOn ? '#ff8800' : '#ff0000';
     } else if (this.destructible) {
       ctx.fillStyle = '#333';
       ctx.strokeStyle = '#888';
@@ -4547,14 +5383,14 @@ class Obstacle {
     ctx.lineWidth = 3;
     ctx.fillRect(s.x - this.w/2, s.y - this.h/2, this.w, this.h);
     ctx.strokeRect(s.x - this.w/2, s.y - this.h/2, this.w, this.h);
-    
+
     if (this.explosive) {
-      ctx.fillStyle = '#ff0000';
+      ctx.fillStyle = flashOn ? '#ffffff' : '#ff0000';
       ctx.font = 'bold 18px Bebas Neue';
       ctx.textAlign = 'center';
       ctx.fillText('☢', s.x, s.y + 6);
     }
-    
+
     if (this.destructible && !this.explosive && this.hp < this.maxHp) {
       ctx.fillStyle = 'rgba(0,0,0,0.7)';
       ctx.fillRect(s.x - this.w/2, s.y - this.h/2 - 6, this.w, 3);
@@ -4807,7 +5643,7 @@ class SlashImpactFlash {
 }
 
 class SlashEffect {
-  constructor(x, y, radius, stage, damage) {
+  constructor(x, y, radius, stage, damage, isRevival = false) {
     this.x = x; this.y = y;
     this.radius = radius;
     this.stage = stage;
@@ -4816,7 +5652,8 @@ class SlashEffect {
     this.life0 = 0.32;
     this.dead = false;
     this.angle = player ? player.angle : 0;
-    
+    this.isRevival = isRevival; // 부활 슬래시 여부 (테레사에게 데미지 없음)
+
     // 이미 맞은 적/총알을 추적 (한 슬래시에서 한 번만 적중)
     this.hitEnemies = new Set();
     this.reflectedBullets = new Set();
@@ -4952,6 +5789,32 @@ class SlashEffect {
       }
     }
     
+    // 히든 보스(테레사) 슬래시 적중
+    if (hiddenBossEntity && !hiddenBossEntity.dead && !this.hiddenBossHit) {
+      if (dist(this, hiddenBossEntity) < this.radius + hiddenBossEntity.r && inCone(hiddenBossEntity.x, hiddenBossEntity.y)) {
+        // 부활 슬래시 또는 카타나 충돌(clash): 밀려나기만, 데미지 없음
+        if (this.isRevival || (hiddenBossEntity.clashCd <= 0 && (hiddenBossEntity.subState === 'swinging' || (hiddenBossEntity.phase === 3 && !hiddenBossEntity.p3Recovering)))) {
+          hiddenBossEntity._doClash();
+        } else {
+          hiddenBossEntity.takeDamage(this.damage, 'slash');
+          STATE.hitstop = Math.max(STATE.hitstop, 200);
+          STATE.shake = Math.max(STATE.shake, 15);
+          for (let i = 0; i < 20; i++) {
+            const a = Math.random() * TAU;
+            particles.push(new Particle(hiddenBossEntity.x, hiddenBossEntity.y, Math.cos(a)*rand(150,400), Math.sin(a)*rand(150,400), rand(0.3,0.7), i%2===0?'#e060ff':'#ffffff', 6));
+          }
+          effects.push(new SlashImpactFlash(hiddenBossEntity.x, hiddenBossEntity.y));
+        }
+        this.hiddenBossHit = true;
+      }
+    }
+    // 테레사 분신 슬래시 적중
+    for (const decoy of hiddenBossDecoys) {
+      if (!decoy.dead && dist(this, decoy) < this.radius + decoy.r && inCone(decoy.x, decoy.y)) {
+        decoy.takeDamage(this.damage, 'slash');
+      }
+    }
+
     // 장애물/폭발물 파괴 — 카타나는 destructible 무시 (모든 걸 부숨)
     for (const ob of obstacles) {
       if (ob.dead) continue;
@@ -5055,6 +5918,44 @@ class SlashEffect {
     ctx.arc(s.x, s.y, this.radius * (0.6 + 0.4 * (1 - a)), this.angle - Math.PI * 0.5, this.angle + Math.PI * 0.5);
     ctx.stroke();
     
+    ctx.restore();
+  }
+}
+
+class TeresaSlashEffect {
+  constructor(x, y, radius, stage, angle) {
+    this.x = x;
+    this.y = y;
+    this.radius = radius;
+    this.stage = stage;
+    this.angle = angle;
+    this.life = 0.32;
+    this.life0 = 0.32;
+    this.dead = false;
+  }
+  update(dt) {
+    this.life -= dt;
+    if (this.life <= 0) this.dead = true;
+  }
+  draw() {
+    const s = worldToScreen(this.x, this.y);
+    const colors = ['#fff', '#ffffff', '#ffcc00', '#ffaa00'];
+    const color = colors[this.stage] || '#fff';
+    const a = this.life / this.life0;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.strokeStyle = color;
+    ctx.shadowBlur = 25;
+    ctx.shadowColor = color;
+    ctx.lineWidth = 6 + this.stage * 2;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, this.radius * (0.7 + 0.3 * (1 - a)), this.angle - Math.PI * 0.7, this.angle + Math.PI * 0.7);
+    ctx.stroke();
+    ctx.lineWidth = 3;
+    ctx.globalAlpha = a * 0.5;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, this.radius * (0.6 + 0.4 * (1 - a)), this.angle - Math.PI * 0.5, this.angle + Math.PI * 0.5);
+    ctx.stroke();
     ctx.restore();
   }
 }
@@ -5311,6 +6212,8 @@ const ENTITY_IMAGES = {
   boss_reaper:     { src: 'images/boss_reaper.png',     size: 150, rotate: false, flip: false },  // 리퍼
   boss_cp09:       { src: 'images/boss_cp09.png',       size: 160, rotate: false, flip: false },  // CP-09
   boss_geminator:  { src: 'images/boss_geminator.png',  size: 280, rotate: false, flip: false },  // 제미네이터
+  boss_teresa:     { src: 'images/boss_teresa.png',     size: 128, rotate: false, flip: false },  // 테레사
+  boss_teresa_decoy:{ src: 'images/boss_teresa_decoy.png', size: 128, rotate: false, flip: false }, // 테레사 분신
   
   // 아이템 (3종) — 픽업도 캐릭터 비율에 맞춰 2배
   pickup_ammo:     { src: 'images/pickup_ammo.png',     size: 56, rotate: false, flip: false },
@@ -5576,20 +6479,29 @@ function updateHUD() {
     }
   }
   
-  // Boss HP
-  if (bossEntity && !bossEntity.dead) {
+  // Boss HP — 일반 보스 또는 히든 보스(테레사) HP 표시
+  const activeHpTarget = (hiddenBossEntity && !hiddenBossEntity.dead) ? hiddenBossEntity
+                        : (bossEntity && !bossEntity.dead) ? bossEntity : null;
+  if (activeHpTarget) {
     document.getElementById('bossHpWrap').style.display = 'block';
-    let nameLabel = bossEntity.name;
-    // 리퍼는 이름 옆에 잔여 목숨 표시
-    if (bossEntity.level === 3 && bossEntity.reaperLives !== undefined) {
+    let nameLabel = activeHpTarget.name;
+    if (activeHpTarget.level === 3 && activeHpTarget.reaperLives !== undefined) {
       let lifeStr = '';
-      for (let i = 0; i < bossEntity.reaperMaxLives; i++) {
-        lifeStr += i < bossEntity.reaperLives ? '◆' : '◇';
+      for (let i = 0; i < activeHpTarget.reaperMaxLives; i++) {
+        lifeStr += i < activeHpTarget.reaperLives ? '◆' : '◇';
       }
-      nameLabel = `${bossEntity.name}  ${lifeStr}`;
+      nameLabel = `${activeHpTarget.name}  ${lifeStr}`;
+    }
+    // 테레사: HP를 다이아몬드로 표시 (TERESA_MAX_HP 개)
+    if (activeHpTarget === hiddenBossEntity) {
+      let hpStr = '';
+      for (let i = 0; i < activeHpTarget.maxHp; i++) {
+        hpStr += i < activeHpTarget.hp ? '◆' : '◇';
+      }
+      nameLabel = `${activeHpTarget.name}  ${hpStr}`;
     }
     document.getElementById('bossName').textContent = nameLabel;
-    document.getElementById('bossHpFill').style.width = `${(bossEntity.hp / bossEntity.maxHp) * 100}%`;
+    document.getElementById('bossHpFill').style.width = `${(activeHpTarget.hp / activeHpTarget.maxHp) * 100}%`;
   } else {
     document.getElementById('bossHpWrap').style.display = 'none';
   }
@@ -5706,6 +6618,7 @@ function closeCheat() {
 document.querySelectorAll('[data-cheat]').forEach(el => {
   el.addEventListener('click', () => {
     const c = el.dataset.cheat;
+    STATE.usedCheat = true;
     if (c === 'money') player.btc += 99999;
     if (c === 'battery') {
       player.batteryMax = 999;
@@ -5721,6 +6634,14 @@ document.querySelectorAll('[data-cheat]').forEach(el => {
       wrap.style.display = wrap.style.display === 'none' ? 'block' : 'none';
       return;
     }
+    if (c === 'teresa') {
+      if (!STATE.bossActive && !STATE.hiddenBossActive) {
+        closeCheat();
+        _spawnHiddenBoss();
+      }
+      sfx('pickup');
+      return;
+    }
     sfx('pickup');
   });
 });
@@ -5728,6 +6649,7 @@ document.querySelectorAll('[data-cheat]').forEach(el => {
 // Cheat: spawn specific boss
 document.querySelectorAll('[data-bosslevel]').forEach(el => {
   el.addEventListener('click', () => {
+    STATE.usedCheat = true;
     const level = parseInt(el.dataset.bosslevel);
     if (STATE.bossActive) return;  // 이미 보스 있으면 무시
     
@@ -5845,7 +6767,9 @@ function _spawnBossWarning(level) {
       bx = clamp(bx, 100, WORLD.w - 100);
       by = clamp(by, 100, WORLD.h - 100);
       bossEntity = new Boss(bx, by, level);
-      
+      // 제미네이터(최종 보스) 등장 시 무피해 추적 초기화
+      if (level === 5) STATE.bossFightNoDamage = true;
+
       // 보스 등장 시: 필드의 모든 투사체 제거 + 플레이어 임시 무적
       enemyBullets = [];
       bullets = [];
@@ -6062,8 +6986,7 @@ function drawBackground() {
       const startY = Math.floor(worldTop / tileSize) * tileSize;
       for (let wx = startX; wx < worldRight; wx += tileSize) {
         for (let wy = startY; wy < worldBottom; wy += tileSize) {
-          // 월드 경계 밖은 안 그림
-          if (wx + tileSize <= 0 || wy + tileSize <= 0 || wx >= WORLD.w || wy >= WORLD.h) continue;
+          // 경계 밖에도 타일 적용 (화면 전체를 덮음)
           const s = worldToScreen(wx, wy);
           ctx.drawImage(fieldImg, s.x, s.y, tileSize, tileSize);
         }
@@ -6231,6 +7154,8 @@ function update(dt) {
   // Update entities — 적/총알/효과는 슬로우모션 영향 받음
   for (const en of enemies) en.update(enemyDt);
   if (bossEntity) bossEntity.update(bossDt);
+  if (hiddenBossEntity) hiddenBossEntity.update(bossDt);
+  for (const decoy of hiddenBossDecoys) decoy.update(bossDt);
   for (const b of bullets) b.update(dt);                  // 플레이어 총알은 정상속도 (플레이어가 쏘는 거니까)
   for (const eb of enemyBullets) {
     // 플레이어가 반사한 총알은 정상속도, 적 총알은 슬로우모션
@@ -6244,6 +7169,7 @@ function update(dt) {
   for (const bs of bloodstains) bs.update(dt);
   for (const cs of corpseStains) cs.update(dt);
   for (const h of holograms) h.update(dt);
+  for (const ob of obstacles) ob.update(dt);  // 폭발물 카운트다운
   
   // 리스폰 큐 처리: 60초 카운트다운 → 0 도달 시 홀로그램으로 변환
   for (let i = respawnQueue.length - 1; i >= 0; i--) {
@@ -6279,7 +7205,10 @@ function update(dt) {
   bloodstains = bloodstains.filter(bs => !bs.dead);
   corpseStains = corpseStains.filter(cs => !cs.dead);
   holograms = holograms.filter(h => !h.dead);
-  
+  if (bossEntity && bossEntity.dead) bossEntity = null;
+  if (hiddenBossEntity && hiddenBossEntity.dead) hiddenBossEntity = null;
+  hiddenBossDecoys = hiddenBossDecoys.filter(d => !d.dead);
+
   // Boss flow
   // 2분이 지난 뒤(STATE.spawnFrozen=true) + 남은 적이 모두 처치된 뒤 보스 등장
   const phaseElapsed = STATE.time - STATE.phaseStartTime;
@@ -6293,10 +7222,16 @@ function update(dt) {
     // 즉시 setTimeout/limitBreak 트리거가 두 번 들리지 않도록 플래그 잠금
     STATE.bossDefeated = false;  // 이번 처치 처리됨 → 다음 spawnBoss 의 트리거 방지는 bossActive 유지로 보장
     
-    // Phase 5 = ending
+    // Phase 5 = ending (or hidden boss if conditions met)
     if (STATE.phase >= 5) {
-      // Wipe all enemies
       for (const e of enemies) e.dead = true;
+      // 히든 보스 조건: 보통(normal) 이상 난이도 + 제미네이터 무피해 클리어
+      const diffKey = normalizeDifficultyKey(STATE.difficulty);
+      if (diffKey !== 'hero' && STATE.bossFightNoDamage) {
+        _spawnHiddenBoss();
+        return;
+      }
+      // 일반 엔딩
       STATE.ended = true;
       setTimeout(() => {
         document.getElementById('endingScreen').classList.add('show');
@@ -6332,6 +7267,12 @@ function drawDepthSortedWorldEntities() {
   }
   if (bossEntity && !bossEntity.dead) {
     items.push({ y: bossEntity.y + bossEntity.r, draw: () => bossEntity.draw() });
+  }
+  if (hiddenBossEntity && !hiddenBossEntity.dead) {
+    items.push({ y: hiddenBossEntity.y + hiddenBossEntity.r, draw: () => hiddenBossEntity.draw() });
+  }
+  for (const decoy of hiddenBossDecoys) {
+    if (!decoy.dead) items.push({ y: decoy.y + decoy.r, draw: () => decoy.draw() });
   }
   if (player) {
     items.push({ y: player.y + player.r, draw: () => player.draw() });
@@ -6511,8 +7452,10 @@ function startGame() {
   respawnQueue = [];
   holograms = [];
   bossEntity = null;
+  hiddenBossEntity = null;
+  hiddenBossDecoys = [];
   drone = null;
-  
+
   STATE.running = true;
   STATE.paused = false;
   STATE.phase = 1;
@@ -6526,6 +7469,10 @@ function startGame() {
   document.getElementById('bossWarning').style.display = 'none';
   STATE.gameOver = false;
   STATE.ended = false;
+  STATE.bossFightNoDamage = true;
+  STATE.hiddenBossActive = false;
+  STATE.hiddenClear = false;
+  STATE.usedCheat = false;
   // 통계 초기화
   STATE.kills = 0;
   STATE.bossKills = 0;
@@ -6803,8 +7750,13 @@ function _dlgEnd() {
   if (screenId === 'storyScreen') {
     document.getElementById('storyPortrait').classList.remove('show');
   } else {
-    document.getElementById('bossPortrait').classList.remove('show');
-    document.getElementById('bossCutscenePlayerPortrait').classList.remove('show');
+    const bp = document.getElementById('bossPortrait');
+    const pp = document.getElementById('bossCutscenePlayerPortrait');
+    bp.classList.remove('show');
+    pp.classList.remove('show');
+    // src 초기화 — 다음 컷씬 시작 시 이전 보스 이미지가 잠깐 보이는 현상 방지
+    bp.src = '';
+    pp.src = '';
   }
   
   if (screenId === 'bossCutscene') {
@@ -6948,8 +7900,10 @@ function startTutorial() {
   respawnQueue = [];
   holograms = [];
   bossEntity = null;
+  hiddenBossEntity = null;
+  hiddenBossDecoys = [];
   drone = null;
-  
+
   STATE.running = true;
   STATE.paused = false;
   STATE.phase = 1;
@@ -6962,6 +7916,10 @@ function startTutorial() {
   STATE.bossInvulnTimer = 0;
   STATE.gameOver = false;
   STATE.ended = false;
+  STATE.bossFightNoDamage = true;
+  STATE.hiddenBossActive = false;
+  STATE.hiddenClear = false;
+  STATE.usedCheat = false;
   STATE.inTutorial = true;
   STATE.tutorialStep = 0;
   
@@ -7118,30 +8076,40 @@ const BOSS_CUTSCENES = {
   ],
   // 페이즈 2: 크랙슨
   2: [
-    { side: 'right', name: '크랙슨', text: '— 백규를 죽인 놈이 너냐.', portrait: 'images/boss2_crackson.png' },
-    { side: 'left',  name: '사마엘', text: '...', portrait: 'images/standing.png' },
-    { side: 'right', name: '크랙슨', text: '말이 없군. 좋아.\n그럼 비명부터 지르게 해주지.', portrait: 'images/boss2_crackson.png' },
+    { side: 'right', name: '크랙슨', text: '—백규를 죽인 놈이 너냐.', portrait: 'images/boss2_crackson.png' },
+    { side: 'left',  name: '사마엘', text: '이번에는 또 두툼한 놈이 나왔군', portrait: 'images/standing.png' },
+    { side: 'right', name: '크랙슨', text: '...좋아, 비명지르면서도 배짱이 살아있나 볼까.', portrait: 'images/boss2_crackson.png' },
   ],
   // 페이즈 3: 리퍼
   3: [
-    { side: 'right', name: '리퍼', text: '...너, 참진리연구회지.', portrait: 'images/boss3_reaper.png' },
+    { side: 'right', name: '리퍼', text: '...너, 참진리연구회구나.', portrait: 'images/boss3_reaper.png' },
     { side: 'left',  name: '사마엘', text: '샘플 내놔.', portrait: 'images/standing.png' },
     { side: 'right', name: '리퍼', text: '진리를 독점하려는 네놈들의 수작은 끝났다.', portrait: 'images/boss3_reaper.png' },
-    { side: 'right', name: '리퍼', text: '샘플은 이미 다른 곳으로 옮겼어.\n네가 와봐야 늦었다는 뜻이지.', portrait: 'images/boss3_reaper.png' },
+    { side: 'right', name: '리퍼', text: '샘플은 이미 사용됐어.\n계속 남아있으면 죽을 뿐이야.', portrait: 'images/boss3_reaper.png' },
   ],
   // 페이즈 4: CP-09
   4: [
     { side: 'right', name: 'CP-09', text: '—적성 식별. 참진리 연구회 회수요원.\n위협등급 갱신: 최상.', portrait: 'images/boss4_cp09.png' },
     { side: 'left',  name: '사마엘', text: '기계인가. 그쪽이 더 깔끔하겠군.', portrait: 'images/standing.png' },
-    { side: 'right', name: 'CP-09', text: '제거 절차 개시.', portrait: 'images/boss4_cp09.png' },
+    { side: 'right', name: 'CP-09', text: '너 지금 정말 **핵심**을 짚었어.\n제거 절차 개시.', portrait: 'images/boss4_cp09.png' },
   ],
   // 페이즈 5: 제미네이터 (최종 보스)
   5: [
     { side: 'right', name: '제미네이터', text: '여기까지 왔나, 광신도.', portrait: 'images/boss5_geminator.png' },
     { side: 'left',  name: '사마엘', text: '네녀석이 마지막인가? \n슬슬 지겹군.', portrait: 'images/standing.png' },
     { side: 'right', name: '제미네이터', text: '\"진리\"는 독점할 수 있는게 아니야.\n우주는 모두에게 열려 있어야지.', portrait: 'images/boss5_geminator.png' },
-    { side: 'left',  name: '사마엘', text: '너희 같은 무지렁이들이 진리를 들여다보면\n그건 진리가 아니라 재앙이 된다.', portrait: 'images/standing.png' },
+    { side: 'left',  name: '사마엘', text: '너희 같은 무지렁이들이 진리를 들여다보면\n그건 진리가 아니라 재앙이 될걸.', portrait: 'images/standing.png' },
     { side: 'right', name: '제미네이터', text: '과연 그럴까? 한번 진리의 힘을 시험해보자고.', portrait: 'images/boss5_geminator.png' },
+  ],
+  // 히든 보스: 테레사
+  hidden: [
+    { side: 'left',  name: '사마엘', text: '...너는 누구지?.', portrait: 'images/standing.png' },
+    { side: 'right', name: '테레사', text: '이 지역은 이제 중앙에서 관리한다. 연구회.', portrait: 'images/boss6_teresa.png' },
+    { side: 'left',  name: '사마엘', text: '이건 연구회 일이야. 중앙은 개입하면 안될텐데.', portrait: 'images/standing.png' },
+    { side: 'right', name: '테레사', text: '샘플 666번은 해적들 손에 둘수도, 광신도들 손에 둘 수 없다\n죽고 싶지 않으면 조용히 물러나라.', portrait: 'images/boss6_teresa.png' },
+    { side: 'left',  name: '사마엘', text: '누가 죽는지 확인해볼까.', portrait: 'images/standing.png' },
+    { side: 'right', name: '테레사', text: '어리석기는. \n애초에 네 능력이 어디서 기원했는지 모르는구나.', portrait: 'images/boss6_teresa.png' },
+    { side: 'right', name: '테레사', text: '덤벼라, 카피캣. 귀여워 해주마.', portrait: 'images/boss6_teresa.png' },
   ],
 };
 
@@ -7434,6 +8402,7 @@ function computeFinalScore() {
     survival:   survivedSec * 10,
     clearBonus: STATE.ended ? 20000 : 0,
     noDeath:    (!STATE.gameOver && lives === maxLives) ? 5000 : 0,
+    hiddenClear: STATE.hiddenClear ? 50000 : 0,  // 히든 보스(테레사) 처치 특별 점수
   };
   const rawTotal = Object.values(breakdown).reduce((a, b) => a + b, 0);
   const difficulty = normalizeDifficultyKey(STATE.difficulty);
@@ -7486,6 +8455,7 @@ function buildResultPanelHTML(result) {
   ];
   if (b.clearBonus > 0) rows.push(['클리어 보너스', '★', `+${fmtNum(b.clearBonus)}`]);
   if (b.noDeath > 0)    rows.push(['NO DEATH', '♥♥♥', `+${fmtNum(b.noDeath)}`]);
+  if (b.hiddenClear > 0) rows.push(['히든 클리어', '테레사 처치', `+${fmtNum(b.hiddenClear)}`]);
   if (result.difficultyMultiplier && result.difficultyMultiplier !== 1) {
     rows.push(['난이도 보정', difficultyLabel(result.difficulty), `x${result.difficultyMultiplier}`]);
   }
@@ -7808,7 +8778,10 @@ async function injectScoreboard(screenId) {
   // 랭킹 저장 (같은 런 1회만)
   let rankingResult;
   let highlightIdx = -1;
-  if (!_scoreSavedThisRun) {
+  if (STATE.usedCheat) {
+    _scoreSavedThisRun = true;
+    rankingResult = await loadRankingOnline();
+  } else if (!_scoreSavedThisRun) {
     _scoreSavedThisRun = true;
     result.playerName = getPlayerName();
     result.clientRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -7837,7 +8810,8 @@ async function injectScoreboard(screenId) {
   const panel = wrap.querySelector('.ranking-panel');
   if (panel) {
     const source = rankingResult.source === 'server' ? 'ONLINE RANKING' : 'LOCAL RANKING';
-    panel.insertAdjacentHTML('beforeend', `<div class="ranking-source">${source}</div>`);
+    const suffix = STATE.usedCheat ? ' · CHEAT RUN NOT SAVED' : '';
+    panel.insertAdjacentHTML('beforeend', `<div class="ranking-source">${source}${suffix}</div>`);
   }
 }
 
