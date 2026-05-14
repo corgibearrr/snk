@@ -8392,6 +8392,17 @@ function getPlayerName() {
   }
 }
 
+function changePlayerName() {
+  try {
+    const saved = normalizePlayerName(localStorage.getItem(RANKING_NAME_KEY));
+    const typed = prompt('새 닉네임을 입력하세요', saved || 'PLAYER');
+    if (typed === null) return; // 취소
+    const name = normalizePlayerName(typed);
+    localStorage.setItem(RANKING_NAME_KEY, name);
+    renderTitleRanking(); // 랭킹 패널 닉네임 표시 갱신
+  } catch (e) {}
+}
+
 function toSupabaseRankingEntry(entry) {
   return {
     player_name: entry.playerName || 'PLAYER',
@@ -8864,6 +8875,31 @@ function ensureScoreboardCSS() {
       color: #777;
       letter-spacing: 2px;
     }
+    .ranking-name-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 8px;
+      font-size: 12px;
+      color: #aaa;
+    }
+    .ranking-my-name b {
+      color: #d36cff;
+    }
+    .ranking-name-btn {
+      background: rgba(160,70,255,0.2);
+      border: 1px solid rgba(160,70,255,0.5);
+      color: #d36cff;
+      border-radius: 4px;
+      padding: 2px 10px;
+      font-size: 11px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .ranking-name-btn:hover {
+      background: rgba(160,70,255,0.4);
+    }
     .rank-meta {
       color: #888;
       font-size: 11px;
@@ -9026,7 +9062,14 @@ async function renderTitleRanking() {
   const rankingResult = await loadRankingOnline();
   panel.innerHTML = buildRankingPanelHTML(rankingResult.ranking, -1);
   const source = rankingResult.source === 'server' ? 'ONLINE RANKING' : 'LOCAL RANKING';
-  panel.insertAdjacentHTML('beforeend', `<div class="ranking-source">${source}</div>`);
+  const currentName = normalizePlayerName(localStorage.getItem(RANKING_NAME_KEY));
+  panel.insertAdjacentHTML('beforeend', `
+    <div class="ranking-source">${source}</div>
+    <div class="ranking-name-row">
+      <span class="ranking-my-name">내 닉네임: <b>${escapeHTML(currentName)}</b></span>
+      <button class="ranking-name-btn" onclick="changePlayerName()">변경</button>
+    </div>
+  `);
 }
 
 // 타이틀 화면 표시 시점에 랭킹 갱신
