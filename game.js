@@ -2010,6 +2010,7 @@ class Enemy {
     this.meleeAttackCd = 0;    // 근접 공격 후 쿨다운
     this.meleeRange = 0;       // 근접 공격 발동 거리 (작을수록 가까이 와야 맞음)
     this.facingLeft = false;   // 좌우 반전용 (회전 X)
+    this.attackAnim = 0;       // 원거리 공격 직후 애니메이션 타이머 (이미지 상태용)
     
     // Types
     if (type === 'rusher') {
@@ -2167,6 +2168,7 @@ class Enemy {
       return;
     }
     if (this.cooldown > 0) this.cooldown -= dt;
+    if (this.attackAnim > 0) this.attackAnim -= dt;
     this.hitFlash = Math.max(this.hitFlash - dt, 0);
     
     const targetAngle = angleTo(this, player);
@@ -2213,6 +2215,7 @@ class Enemy {
             enemyBullets.push(new EnemyBullet(this.x, this.y, Math.cos(targetAngle) * sp, Math.sin(targetAngle) * sp, {color: '#ff8030', r: 12}));
             sfx('enemyShoot');
           }
+          this.attackAnim = 0.5;       // 공격 애니메이션 트리거
           this.burstLeft = 2;          // 추가 2발 (총 3발)
           this.burstTimer = this.burstInterval;
           this.aiming = 0;
@@ -2307,6 +2310,7 @@ class Enemy {
           const sp = 2700;
           enemyBullets.push(new EnemyBullet(this.x, this.y, Math.cos(this.aimAngle) * sp, Math.sin(this.aimAngle) * sp, {color: '#ffff00', r: 8, fast: true}));
           sfx('enemyShoot');
+          this.attackAnim = 0.6;   // 공격 애니메이션 트리거
           this.cooldown = 3;
           this.aimLine = null;
         }
@@ -2421,9 +2425,12 @@ class Enemy {
       ctx.restore();
     }
     
-    // Image override (이미지 있으면 도형 대신 이미지 사용 — 회전 X, 좌우반전만)
-    const imgKey = 'enemy_' + this.type;
-    if (drawEntityImage(imgKey, 0, 0, 0, this.facingLeft)) {
+    // Image override (상태 이미지 → 기본 이미지 → 도형 폴백 순서로 시도)
+    const imgKey = _getEnemyImgKey(this);
+    const baseKey = 'enemy_' + this.type;
+    const drewImg = drawEntityImage(imgKey, 0, 0, 0, this.facingLeft)
+      || drawEntityImage(baseKey, 0, 0, 0, this.facingLeft);
+    if (drewImg) {
       // 이미지로 그렸으면 도형은 스킵
       ctx.restore();
       // shielder는 방패만 추가로 그림 (좌우반전에 맞춰)
@@ -2722,6 +2729,28 @@ class Boss extends Enemy {
     queueDamageNumber(this, d, -50);
     this.hitFlash = 0.1;
     sfx('hit');
+
+    // 리퍼 피격: 잔상 3개 생성 후 순간이동
+    if (this.level === 3 && this.hp > 0) {
+      const reaperImgKey = this.slidingTime > 0 ? 'boss_reaper_slide' : 'boss_reaper';
+      for (let i = 0; i < 3; i++) {
+        effects.push(new TeleportAfterimage(
+          this.x + rand(-18, 18), this.y + rand(-18, 18),
+          reaperImgKey, 150, this.facingLeft
+        ));
+      }
+      // 플레이어 반대 방향 랜덤 순간이동 (200~420px)
+      const tpAngle = angleTo(player, this) + rand(-0.8, 0.8);
+      const tpDist  = rand(200, 420);
+      this.x = clamp(this.x + Math.cos(tpAngle) * tpDist, this.r, WORLD.w - this.r);
+      this.y = clamp(this.y + Math.sin(tpAngle) * tpDist, this.r, WORLD.h - this.r);
+      // 도착 파티클
+      for (let i = 0; i < 10; i++) {
+        const a = Math.random() * TAU;
+        particles.push(new Particle(this.x, this.y, Math.cos(a)*rand(60,180), Math.sin(a)*rand(60,180), 0.35, '#a020f0', 5));
+      }
+    }
+
     if (this.hp <= 0) {
       // 백규: 1회 부활 (무적 회복 페이즈를 거친 뒤 풀 HP로 부활)
       if (this.level === 1 && this.revivesLeft > 0 && !this.reviving) {
@@ -4118,9 +4147,13 @@ class Boss extends Enemy {
       ctx.restore();
     }
     
-    const bossKeys = { 1: 'boss_baekgyu', 2: 'boss_crackson', 3: 'boss_reaper', 4: 'boss_cp09', 5: 'boss_geminator' };
-    const bossKey = bossKeys[this.level];
-    if (bossKey && drawEntityImage(bossKey, 0, 0, 0, this.facingLeft)) {
+    const bossBaseKeys = { 1: 'boss_baekgyu', 2: 'boss_crackson', 3: 'boss_reaper', 4: 'boss_cp09', 5: 'boss_geminator' };
+    const bossKey = bossBaseKeys[this.level];
+    const bossStateKey = _getBossImgKey(this);
+    // 상태 이미지 → 기본 이미지 순으로 시도
+    const drewBoss = (bossStateKey && drawEntityImage(bossStateKey, 0, 0, 0, this.facingLeft))
+      || (bossKey && drawEntityImage(bossKey, 0, 0, 0, this.facingLeft));
+    if (drewBoss) {
       ctx.restore();
       // 제미네이터는 약점도 그려야 함 (약점은 본체보다 앞으로 튀어나온 위치)
       if (this.level === 5) {
@@ -4880,11 +4913,11 @@ class HiddenBoss {
     // 히트플래시
     if (this.hitFlash > 0) ctx.filter = 'brightness(3)';
 
-    // 1순위: boss_teresa.png (커스텀 이미지 추가 시 자동 사용)
-    // 2순위: 플레이어 idle 애니메이션 스프라이트 (기존 파일 재활용)
-    // 3순위: 원형 폴백
+    // 1순위: 상태별 이미지, 2순위: boss_teresa.png, 3순위: 플레이어 idle 스프라이트, 4순위: 원형 폴백
     const drawSize = this.r * 4;
-    const drew = drawEntityImage('boss_teresa', 0, 0, null, false)
+    const teresaStateKey = _getTeresaImgKey(this);
+    const drew = drawEntityImage(teresaStateKey, 0, 0, null, false)
+      || drawEntityImage('boss_teresa', 0, 0, null, false)
       || (typeof drawAnimFrame === 'function' && drawAnimFrame('idle', 0, 0, 0, drawSize, false));
 
     ctx.filter = 'none';
@@ -5598,6 +5631,49 @@ class CorpseStain {
   }
 }
 
+// 리퍼 피격 시 순간이동 잔상 (보라색 잔영)
+class TeleportAfterimage {
+  constructor(x, y, imgKey, imgSize, facingLeft) {
+    this.x = x; this.y = y;
+    this.imgKey = imgKey;
+    this.imgSize = imgSize;
+    this.facingLeft = facingLeft;
+    this.life = 0.55;
+    this.life0 = 0.55;
+    this.dead = false;
+  }
+  update(dt) {
+    this.life -= dt;
+    if (this.life <= 0) this.dead = true;
+  }
+  draw() {
+    const s = worldToScreen(this.x, this.y);
+    const alpha = this.life / this.life0;
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.75;
+    ctx.filter = 'hue-rotate(260deg) saturate(4) brightness(1.8)';
+    if (this.facingLeft) {
+      ctx.translate(s.x, s.y);
+      ctx.scale(-1, 1);
+      if (!drawEntityImage(this.imgKey, 0, 0, 0, false, this.imgSize)) {
+        ctx.fillStyle = `rgba(160, 32, 240, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(0, 0, 75, 0, TAU);
+        ctx.fill();
+      }
+    } else {
+      if (!drawEntityImage(this.imgKey, s.x, s.y, 0, false, this.imgSize)) {
+        ctx.fillStyle = `rgba(160, 32, 240, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 75, 0, TAU);
+        ctx.fill();
+      }
+    }
+    ctx.filter = 'none';
+    ctx.restore();
+  }
+}
+
 class SlashImpactFlash {
   constructor(x, y) {
     this.x = x; this.y = y;
@@ -6192,28 +6268,53 @@ const ANIMATIONS = {
 // flip: 'left' 면 좌측으로 진행 시 좌우 반전.
 //
 const ENTITY_IMAGES = {
-  // 일반 적 (5종) — 모두 플레이어와 같은 128px, 방패병만 160px. 회전 X (좌우 반전만).
-  enemy_rusher:    { src: 'images/enemy_rusher.png',    size: 128, rotate: false, flip: false },
-  enemy_shooter:   { src: 'images/enemy_shooter.png',   size: 128, rotate: false, flip: false },
-  enemy_shielder:  { src: 'images/enemy_shielder.png',  size: 160, rotate: false, flip: false },
-  enemy_assassin:  { src: 'images/enemy_assassin.png',  size: 128, rotate: false, flip: false },
-  enemy_sniper:    { src: 'images/enemy_sniper.png',    size: 128, rotate: false, flip: false },
-  
+  // 일반 적 (5종) — 기본(idle), 달리기, 공격. 파일이 없으면 기본 이미지로 폴백.
+  enemy_rusher:         { src: 'images/enemy_rusher.png',          size: 128, rotate: false, flip: false },
+  enemy_rusher_run:     { src: 'images/enemy_rusher_run.png',      size: 128, rotate: false, flip: false },
+  enemy_rusher_attack:  { src: 'images/enemy_rusher_attack.png',   size: 128, rotate: false, flip: false },
+  enemy_shooter:        { src: 'images/enemy_shooter.png',         size: 128, rotate: false, flip: false },
+  enemy_shooter_run:    { src: 'images/enemy_shooter_run.png',     size: 128, rotate: false, flip: false },
+  enemy_shooter_attack: { src: 'images/enemy_shooter_attack.png',  size: 128, rotate: false, flip: false },
+  enemy_shielder:       { src: 'images/enemy_shielder.png',        size: 160, rotate: false, flip: false },
+  enemy_shielder_run:   { src: 'images/enemy_shielder_run.png',    size: 160, rotate: false, flip: false },
+  enemy_shielder_attack:{ src: 'images/enemy_shielder_attack.png', size: 160, rotate: false, flip: false },
+  enemy_assassin:       { src: 'images/enemy_assassin.png',        size: 128, rotate: false, flip: false },
+  enemy_assassin_run:   { src: 'images/enemy_assassin_run.png',    size: 128, rotate: false, flip: false },
+  enemy_assassin_attack:{ src: 'images/enemy_assassin_attack.png', size: 128, rotate: false, flip: false },
+  enemy_assassin_slide: { src: 'images/enemy_assassin_slide.png',  size: 128, rotate: false, flip: false },
+  enemy_sniper:         { src: 'images/enemy_sniper.png',          size: 128, rotate: false, flip: false },
+  enemy_sniper_run:     { src: 'images/enemy_sniper_run.png',      size: 128, rotate: false, flip: false },
+  enemy_sniper_attack:  { src: 'images/enemy_sniper_attack.png',   size: 128, rotate: false, flip: false },
+
   // 일반 적 사망 잔상. 파일이 없으면 표시하지 않고 넘어갑니다.
   enemy_rusher_dead:    { src: 'images/enemy_rusher_dead.png',    size: 128, rotate: false, flip: false },
   enemy_shooter_dead:   { src: 'images/enemy_shooter_dead.png',   size: 128, rotate: false, flip: false },
   enemy_shielder_dead:  { src: 'images/enemy_shielder_dead.png',  size: 160, rotate: false, flip: false },
   enemy_assassin_dead:  { src: 'images/enemy_assassin_dead.png',  size: 128, rotate: false, flip: false },
   enemy_sniper_dead:    { src: 'images/enemy_sniper_dead.png',    size: 128, rotate: false, flip: false },
-  
-  // 보스 (5종) — 기존 대비 약 2배 확대. 회전 X.
-  boss_baekgyu:    { src: 'images/boss_baekgyu.png',    size: 128, rotate: false, flip: false },  // 백규
-  boss_crackson:   { src: 'images/boss_crackson.png',   size: 180, rotate: false, flip: false },  // 크랙슨
-  boss_reaper:     { src: 'images/boss_reaper.png',     size: 150, rotate: false, flip: false },  // 리퍼
-  boss_cp09:       { src: 'images/boss_cp09.png',       size: 160, rotate: false, flip: false },  // CP-09
-  boss_geminator:  { src: 'images/boss_geminator.png',  size: 280, rotate: false, flip: false },  // 제미네이터
-  boss_teresa:     { src: 'images/boss_teresa.png',     size: 128, rotate: false, flip: false },  // 테레사
-  boss_teresa_decoy:{ src: 'images/boss_teresa_decoy.png', size: 128, rotate: false, flip: false }, // 테레사 분신
+
+  // 보스 (5종) — 기본 + 상태별 이미지. 파일이 없으면 기본으로 폴백.
+  boss_baekgyu:         { src: 'images/boss_baekgyu.png',         size: 128, rotate: false, flip: false },  // 백규
+  boss_baekgyu_run:     { src: 'images/boss_baekgyu_run.png',     size: 128, rotate: false, flip: false },
+  boss_baekgyu_slide:   { src: 'images/boss_baekgyu_slide.png',   size: 128, rotate: false, flip: false },
+  boss_crackson:        { src: 'images/boss_crackson.png',        size: 180, rotate: false, flip: false },  // 크랙슨
+  boss_crackson_run:    { src: 'images/boss_crackson_run.png',    size: 180, rotate: false, flip: false },
+  boss_crackson_shockwave:{ src: 'images/boss_crackson_shockwave.png', size: 180, rotate: false, flip: false },
+  boss_crackson_dash:   { src: 'images/boss_crackson_dash.png',   size: 180, rotate: false, flip: false },
+  boss_reaper:          { src: 'images/boss_reaper.png',          size: 150, rotate: false, flip: false },  // 리퍼
+  boss_reaper_slide:    { src: 'images/boss_reaper_slide.png',    size: 150, rotate: false, flip: false },
+  boss_cp09:            { src: 'images/boss_cp09.png',            size: 160, rotate: false, flip: false },  // CP-09
+  boss_cp09_mg:         { src: 'images/boss_cp09_mg.png',         size: 160, rotate: false, flip: false },
+  boss_cp09_bombard:    { src: 'images/boss_cp09_bombard.png',    size: 160, rotate: false, flip: false },
+  boss_geminator:       { src: 'images/boss_geminator.png',       size: 280, rotate: false, flip: false },  // 제미네이터
+  boss_geminator_move:  { src: 'images/boss_geminator_move.png',  size: 280, rotate: false, flip: false },
+  boss_geminator_cooling:{ src: 'images/boss_geminator_cooling.png', size: 280, rotate: false, flip: false },
+  boss_teresa:          { src: 'images/boss_teresa.png',          size: 128, rotate: false, flip: false },  // 테레사
+  boss_teresa_move:     { src: 'images/boss_teresa_move.png',     size: 128, rotate: false, flip: false },
+  boss_teresa_charge:   { src: 'images/boss_teresa_charge.png',   size: 128, rotate: false, flip: false },
+  boss_teresa_swing:    { src: 'images/boss_teresa_swing.png',    size: 128, rotate: false, flip: false },
+  boss_teresa_shoot:    { src: 'images/boss_teresa_shoot.png',    size: 128, rotate: false, flip: false },
+  boss_teresa_decoy:    { src: 'images/boss_teresa_decoy.png',    size: 128, rotate: false, flip: false }, // 테레사 분신
   
   // 아이템 (3종) — 픽업도 캐릭터 비율에 맞춰 2배
   pickup_ammo:     { src: 'images/pickup_ammo.png',     size: 56, rotate: false, flip: false },
@@ -6956,6 +7057,53 @@ function moveEnemyAroundObstacles(ent, dx, dy) {
   
   ent.x = clamp(ent.x, ent.r, WORLD.w - ent.r);
   ent.y = clamp(ent.y, ent.r, WORLD.h - ent.r);
+}
+
+// =============================================================
+// 상태별 이미지 키 선택 헬퍼
+// =============================================================
+
+// 적 상태에 맞는 이미지 키 반환 (없으면 기본 키 반환)
+function _getEnemyImgKey(en) {
+  const t = en.type;
+  if (t === 'assassin') {
+    if (en.dodgeSlideTime > 0)                             return 'enemy_assassin_slide';
+    if (en.meleeTelegraph > 0 || en.attackAnim > 0)        return 'enemy_assassin_attack';
+    return 'enemy_assassin_run';
+  }
+  const isAttacking = en.meleeTelegraph > 0 || en.attackAnim > 0;
+  return isAttacking ? `enemy_${t}_attack` : `enemy_${t}_run`;
+}
+
+// 보스 상태에 맞는 이미지 키 반환 (null이면 기본 키 사용)
+function _getBossImgKey(boss) {
+  switch (boss.level) {
+    case 1: // 백규
+      if (boss.lateralSlideTime > 0) return 'boss_baekgyu_slide';
+      return 'boss_baekgyu_run';
+    case 2: // 크랙슨
+      if (boss.shockwavePrep > 0 || boss.shockwaveActive > 0) return 'boss_crackson_shockwave';
+      if (boss.tripleDashState === 'dashing' || boss.tripleDashState === 'gather') return 'boss_crackson_dash';
+      return 'boss_crackson_run';
+    case 3: // 리퍼
+      if (boss.slidingTime > 0) return 'boss_reaper_slide';
+      return null;  // 기본 boss_reaper 사용
+    case 4: // CP-09
+      if (boss.cp09Bombarding) return 'boss_cp09_bombard';
+      return 'boss_cp09_mg';
+    case 5: // 제미네이터
+      if (boss.geminatorPhase === 'cooling') return 'boss_geminator_cooling';
+      return 'boss_geminator_move';
+    default: return null;
+  }
+}
+
+// 테레사 상태에 맞는 이미지 키 반환
+function _getTeresaImgKey(tb) {
+  if (tb.p2SlashActive || tb.subState === 'swinging') return 'boss_teresa_swing';
+  if (tb.subState === 'charging')                     return 'boss_teresa_charge';
+  if (tb.subState === 'postShot' || tb.subState === 'firing') return 'boss_teresa_shoot';
+  return 'boss_teresa_move';
 }
 
 // =============================================================
@@ -8281,7 +8429,7 @@ function fromSupabaseRankingEntry(row) {
 
 async function fetchServerRanking() {
   if (!SUPABASE_RANKING_ENABLED || typeof fetch !== 'function') return null;
-  
+
   const requestRanking = async (withDifficulty) => {
     const url = new URL(`${SUPABASE_URL}/rest/v1/${SUPABASE_RANKING_TABLE}`);
     const fields = withDifficulty
@@ -8297,12 +8445,27 @@ async function fetchServerRanking() {
       },
     });
   };
-  
+
   let res = await requestRanking(true);
+  let hadDifficultyColumn = res.ok;
   if (!res.ok) res = await requestRanking(false);
   if (!res.ok) throw new Error(`ranking fetch failed: ${res.status}`);
   const rows = await res.json();
-  return Array.isArray(rows) ? rows.map(fromSupabaseRankingEntry) : [];
+  let entries = Array.isArray(rows) ? rows.map(fromSupabaseRankingEntry) : [];
+
+  // difficulty 컬럼이 서버에 없을 경우, 로컬 저장 데이터로 보완
+  if (!hadDifficultyColumn) {
+    try {
+      const localEntries = loadRanking();
+      const localMap = new Map(localEntries.map(e => [e.clientRunId, e.difficulty]).filter(([k]) => k));
+      entries = entries.map(r => ({
+        ...r,
+        difficulty: r.difficulty || localMap.get(r.clientRunId) || 'normal',
+      }));
+    } catch (e) { /* 로컬 보완 실패 무시 */ }
+  }
+
+  return entries;
 }
 
 async function saveServerRankingEntry(entry) {
