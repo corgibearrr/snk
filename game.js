@@ -2059,8 +2059,18 @@ class Enemy {
       this.preferredDist = 500;
       this.aimTime = 2;
       this.aiming = 0;
+    } else if (type === 'mortar') {
+      this.hp = 2; this.maxHp = 2;
+      this.speed = 65;
+      this.color = '#88ff44';
+      this.preferredDist = 700;   // 선호 거리 (원거리 유지)
+      this.fleeRange = 380;       // 이 거리 이내면 도망
+      this.aimTime = 0;           // 조준 시간 없음 — 즉시 발사
+      this.aiming = 0;
+      this.mortarCd = 3.0;        // 발사 쿨다운
+      this.cooldown = rand(1, 4); // 초기 쿨다운 랜덤
     }
-    
+
     const diff = difficultyConfig();
     this.speed *= diff.enemySpeedMult;
     if (this.attackCd !== undefined) this.attackCd *= diff.enemyAttackCdMult;
@@ -2128,14 +2138,31 @@ class Enemy {
     this.dead = true;
     corpseStains.push(new CorpseStain(this));
     sfx('hit');
-    
+
     // 통계: 킬 수 증가 (튜토리얼 적은 카운트 안 함)
     if (!STATE.inTutorial) STATE.kills++;
-    
-    // particles
-    for (let i = 0; i < 15; i++) {
-      const a = Math.random() * TAU;
-      particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(50, 250), Math.sin(a) * rand(50, 250), 0.8, this.color, 6));
+
+    // 박격포병 사망 폭발
+    if (this.type === 'mortar') {
+      const blastR = 160;
+      effects.push(new Explosion(this.x, this.y, blastR, 0));
+      sfx('explode');
+      STATE.shake = Math.max(STATE.shake, 18);
+      if (player && !player.rolling && dist(this, player) < blastR) player.takeDamage();
+      for (const en of enemies) {
+        if (en.dead || en === this) continue;
+        if (dist(this, en) < blastR) en.takeDamage(3);
+      }
+      for (let i = 0; i < 20; i++) {
+        const a = Math.random() * TAU;
+        particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(100, 320), Math.sin(a) * rand(100, 320), 1.0, ['#ffcc00', '#ff6600', '#88ff44'][i % 3], 7));
+      }
+    } else {
+      // 일반 사망 파티클
+      for (let i = 0; i < 15; i++) {
+        const a = Math.random() * TAU;
+        particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(50, 250), Math.sin(a) * rand(50, 250), 0.8, this.color, 6));
+      }
     }
     
     // drops
@@ -2296,7 +2323,7 @@ class Enemy {
       if (d < this.preferredDist - 50) {
         moveEnemyAroundObstacles(this, -Math.cos(targetAngle) * this.speed * dt, -Math.sin(targetAngle) * this.speed * dt);
       }
-      
+
       // 화면 밖이면 조준 취소 (무적 + 사격 X)
       if (!this.isOnScreen()) {
         if (this.aiming > 0) { this.aiming = 0; this.aimLine = null; }
@@ -2317,6 +2344,53 @@ class Enemy {
       } else if (this.cooldown <= 0 && d > 200) {
         this.aiming = this.aimTime;
         sfx('snipeAim');
+      }
+    } else if (this.type === 'mortar') {
+      this.facingLeft = player.x < this.x;
+
+      // 이동: 너무 가까우면 도망, 너무 멀면 천천히 접근 (조준 중에는 이동 없음)
+      if (this.aiming <= 0) {
+        if (d < this.fleeRange) {
+          moveEnemyAroundObstacles(this, -Math.cos(targetAngle) * this.speed * dt, -Math.sin(targetAngle) * this.speed * dt);
+        } else if (d > this.preferredDist + 80) {
+          moveEnemyAroundObstacles(this, Math.cos(targetAngle) * this.speed * 0.5 * dt, Math.sin(targetAngle) * this.speed * 0.5 * dt);
+        }
+        this.angle = targetAngle; // 이동 중에만 각도 갱신
+      }
+
+      // 발사 조건: 쿨다운 끝 + 사거리(2000) 이내 + 도망 범위 밖 + 화면 안
+      if (this.aiming <= 0 && this.cooldown <= 0 && d >= this.fleeRange && d < 2000 && this.isOnScreen()) {
+        const tx = player.x + rand(-50, 50);
+        const ty = player.y + rand(-50, 50);
+        if (this.aimTime > 0) {
+          // 조준 시간이 있으면 목표 위치 잠금 후 대기
+          this.aiming = this.aimTime;
+          this.mortarTargetX = tx;
+          this.mortarTargetY = ty;
+          const lockedAngle = Math.atan2(ty - this.y, tx - this.x);
+          this.angle = lockedAngle;
+          this.aimLine = { angle: lockedAngle, length: d + 50 };
+        } else {
+          // 조준 시간 없음 — 즉시 발사
+          effects.push(new Bombardment(tx, ty, 130, 1.5));
+          sfx('enemyShoot');
+          this.attackAnim = 0.8;
+          this.cooldown = this.mortarCd;
+        }
+      }
+
+      // 조준 진행 중 (aimTime > 0 경우에만 진입)
+      if (this.aiming > 0) {
+        this.aiming -= dt;
+        const lockedAngle = Math.atan2(this.mortarTargetY - this.y, this.mortarTargetX - this.x);
+        this.aimLine = { angle: lockedAngle, length: Math.hypot(this.mortarTargetX - this.x, this.mortarTargetY - this.y) + 50 };
+        if (this.aiming <= 0) {
+          effects.push(new Bombardment(this.mortarTargetX, this.mortarTargetY, 130, 1.5));
+          sfx('enemyShoot');
+          this.attackAnim = 0.8;
+          this.cooldown = this.mortarCd;
+          this.aimLine = null;
+        }
       }
     }
     
@@ -3427,15 +3501,22 @@ class Boss extends Enemy {
       // drift
       moveEnemyAroundObstacles(this, Math.cos(this.phaseTimer * 0.5) * this.speed * dt, Math.sin(this.phaseTimer * 0.7) * this.speed * dt);
       
-      // Spawn enemies (화면 안에 있을 때만)
-      if (this.spawnTimer <= 0 && enemies.length < 15 && this.isOnScreen()) {
-        const types = ['rusher', 'shooter'];
-        const t = types[Math.floor(Math.random() * types.length)];
-        const a = Math.random() * TAU;
-        const sx = this.x + Math.cos(a) * 100;
-        const sy = this.y + Math.sin(a) * 100;
-        enemies.push(new Enemy(sx, sy, t));
-        // also obstacle
+      // Spawn enemies — 맵 경계에서 등장 (보스 옆 아님)
+      if (this.spawnTimer <= 0 && enemies.length < 40 && this.isOnScreen()) {
+        const spawnCount = 2 + Math.floor(Math.random() * 2); // 2~3마리씩
+        const types = ['rusher', 'shooter', 'shielder'];
+        for (let si = 0; si < spawnCount; si++) {
+          const t = types[Math.floor(Math.random() * types.length)];
+          // 맵 경계 4면 중 랜덤 선택
+          let sx, sy;
+          const edge = Math.floor(Math.random() * 4);
+          if (edge === 0) { sx = rand(0, WORLD.w); sy = -60; }           // 위
+          else if (edge === 1) { sx = rand(0, WORLD.w); sy = WORLD.h + 60; } // 아래
+          else if (edge === 2) { sx = -60; sy = rand(0, WORLD.h); }       // 왼쪽
+          else { sx = WORLD.w + 60; sy = rand(0, WORLD.h); }              // 오른쪽
+          enemies.push(new Enemy(sx, sy, t));
+        }
+        // 장애물 소환 (기존 유지)
         if (this.spawnedObstacles < 6 && Math.random() < 0.4) {
           obstacles.push(new Obstacle(rand(player.x - 300, player.x + 300), rand(player.y - 300, player.y + 300), Math.random() < 0.3));
           this.spawnedObstacles++;
@@ -5280,30 +5361,44 @@ class Pickup {
 class Obstacle {
   constructor(x, y, explosive, opts) {
     this.x = x; this.y = y;
-    // opts 가 주어지면 그 값을 사용 (리스폰 시) — 아니면 새로 랜덤 생성
-    // 캐릭터 크기에 비례해서 2배 확대 (기존 40~100 → 80~200)
     this.w = (opts && opts.w) || rand(80, 200);
     this.h = (opts && opts.h) || rand(80, 200);
-    this.hp = explosive ? 5 : 999;
-    this.maxHp = this.hp;
-    // destructible: 폭발물이거나, opts 로 지정됐거나, 40% 확률
-    if (opts && opts.destructible !== undefined) {
-      this.destructible = opts.destructible;
+    // 보물 컨테이너 여부
+    this.treasure = !!(opts && opts.treasure);
+    if (this.treasure) {
+      this.w = 90; this.h = 90;
+      this.hp = 6; this.maxHp = 6;
+      this.destructible = true;
+      this.explosive = false;
     } else {
-      this.destructible = explosive || Math.random() < 0.4;
+      // 모든 장애물은 총으로 파괴 가능. HP만 차이남.
+      // · 폭발물: HP 5
+      // · 일반(40%): HP 8  — 쉽게 파괴
+      // · 견고(60%): HP 30 — 많은 총알 필요, 카타나는 여전히 즉사
+      this.destructible = true;
+      if (opts && opts.destructible !== undefined) {
+        this.destructible = opts.destructible;
+      }
+      if (explosive) {
+        this.hp = 5;
+      } else {
+        this.hp = Math.random() < 0.4 ? 8 : 30;
+      }
+      this.maxHp = this.hp;
+      this.explosive = explosive;
     }
-    if (this.destructible && !explosive) this.hp = 8;
-    this.explosive = explosive;
     this.dead = false;
     // 폭발 카운트다운 (피격 후 깜빡이다가 터짐)
     this.blinking = false;
     this.blinkOn = false;
     this.blinkTimer = 0;
     this.explodeTimer = 0;
+    this.hitFlash = 0; // 피격 플래시 타이머
   }
 
   // 폭발물 카운트다운 업데이트 (메인 루프에서 호출)
   update(dt) {
+    if (this.hitFlash > 0) this.hitFlash -= dt;
     if (!this.blinking) return;
     this.explodeTimer -= dt;
     // 남은 시간에 따라 점점 빨라지는 깜빡임 (2초 → 0.04초 주기)
@@ -5348,6 +5443,7 @@ class Obstacle {
     if (!this.destructible) return;
     if (this.blinking) return;  // 이미 카운트다운 중
     this.hp -= d;
+    this.hitFlash = 0.12; // 피격 플래시
     if (this.hp <= 0) {
       if (this.explosive) {
         // 즉시 폭발 대신 2초 깜빡임 카운트다운 시작
@@ -5360,20 +5456,37 @@ class Obstacle {
       }
       // 비폭발 장애물: 즉시 처리
       this.dead = true;
-      respawnQueue.push({
-        x: this.x, y: this.y,
-        w: this.w, h: this.h,
-        explosive: false,
-        destructible: true,
-        timer: 60,
-      });
-      for (let i = 0; i < 15; i++) {
-        const a = Math.random() * TAU;
-        particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(80, 200), Math.sin(a) * rand(80, 200), 0.6, '#666', 6));
+      if (!this.treasure) {
+        respawnQueue.push({
+          x: this.x, y: this.y,
+          w: this.w, h: this.h,
+          explosive: false,
+          destructible: true,
+          timer: 60,
+        });
       }
-      if (Math.random() < 0.1) {
-        const types = ['ammo', 'btc', 'battery'];
-        pickups.push(new Pickup(this.x, this.y, types[Math.floor(Math.random() * types.length)]));
+      if (this.treasure) {
+        // 보물 컨테이너 파괴 — 황금 파티클 + 대량 BTC
+        for (let i = 0; i < 25; i++) {
+          const a = Math.random() * TAU;
+          particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(100, 280), Math.sin(a) * rand(100, 280), 0.9, ['#ffd700', '#ffaa00', '#fffaaa'][i % 3], 7));
+        }
+        const btcAmt = Math.floor(rand(1000, 2000));
+        if (player) {
+          player.btc += btcAmt;
+          STATE.totalEarned += btcAmt;
+          damageNumbers.push(new DmgNumber(this.x, this.y - 40, btcAmt, '#ffd700', '₿ +' + btcAmt.toLocaleString()));
+        }
+        sfx('pickup');
+      } else {
+        for (let i = 0; i < 15; i++) {
+          const a = Math.random() * TAU;
+          particles.push(new Particle(this.x, this.y, Math.cos(a) * rand(80, 200), Math.sin(a) * rand(80, 200), 0.6, '#666', 6));
+        }
+        if (Math.random() < 0.1) {
+          const types = ['ammo', 'btc', 'battery'];
+          pickups.push(new Pickup(this.x, this.y, types[Math.floor(Math.random() * types.length)]));
+        }
       }
     }
   }
@@ -5381,21 +5494,41 @@ class Obstacle {
     const s = worldToScreen(this.x, this.y);
     if (s.x + this.w < 0 || s.x - this.w > W || s.y + this.h < 0 || s.y - this.h > H) return;
 
-    // 깜빡임 중: 밝은 빨강 오버레이
+    // 깜빡임(폭발 카운트다운) 또는 피격 플래시 필터
     const flashOn = this.blinking && this.blinkOn;
+    const hitting = this.hitFlash > 0;
     if (flashOn) ctx.filter = 'brightness(3) saturate(2)';
+    else if (hitting) ctx.filter = 'brightness(2.2)';
+
+    // 보물 컨테이너
+    if (this.treasure) {
+      if (drawEntityImageRect('obstacle_treasure', s.x, s.y, this.w, this.h)) {
+        ctx.filter = 'none';
+        return;
+      }
+      // 폴백: 황금 상자
+      ctx.filter = 'none';
+      ctx.save();
+      ctx.fillStyle = '#7a5500';
+      ctx.strokeStyle = '#ffd700';
+      ctx.shadowBlur = 16;
+      ctx.shadowColor = '#ffd700';
+      ctx.lineWidth = 3;
+      ctx.fillRect(s.x - this.w/2, s.y - this.h/2, this.w, this.h);
+      ctx.strokeRect(s.x - this.w/2, s.y - this.h/2, this.w, this.h);
+      ctx.fillStyle = '#ffd700';
+      ctx.font = `bold ${Math.floor(this.w * 0.45)}px Bebas Neue`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('₿', s.x, s.y);
+      ctx.restore();
+      return;
+    }
 
     // Image override
     const imgKey = this.explosive ? 'obstacle_explosive' : 'obstacle_wall';
     if (drawEntityImageRect(imgKey, s.x, s.y, this.w, this.h)) {
       ctx.filter = 'none';
-      // HP bar는 그대로 그림
-      if (this.destructible && !this.explosive && this.hp < this.maxHp) {
-        ctx.fillStyle = 'rgba(0,0,0,0.7)';
-        ctx.fillRect(s.x - this.w/2, s.y - this.h/2 - 6, this.w, 3);
-        ctx.fillStyle = '#ff5050';
-        ctx.fillRect(s.x - this.w/2, s.y - this.h/2 - 6, this.w * (this.hp / this.maxHp), 3);
-      }
       return;
     }
 
@@ -5406,12 +5539,22 @@ class Obstacle {
       ctx.strokeStyle = flashOn ? '#ffff00' : '#ff0000';
       ctx.shadowBlur = flashOn ? 24 : 12;
       ctx.shadowColor = flashOn ? '#ff8800' : '#ff0000';
-    } else if (this.destructible) {
-      ctx.fillStyle = '#333';
-      ctx.strokeStyle = '#888';
+    } else if (this.maxHp <= 8) {
+      // 일반 장애물 (HP 8) — 밝은 회색, HP 비례 어두워짐
+      const hpRatio = this.hp / this.maxHp;
+      const bright = Math.floor(80 * hpRatio + 30);
+      ctx.fillStyle = `rgb(${bright},${bright},${bright})`;
+      ctx.strokeStyle = '#aaa';
+      ctx.shadowBlur = 6;
+      ctx.shadowColor = '#ffffff44';
     } else {
-      ctx.fillStyle = '#1a1a22';
-      ctx.strokeStyle = '#444';
+      // 견고 장애물 (HP 30) — 진한 남색, HP 비례 밝아짐
+      const hpRatio = this.hp / this.maxHp;
+      const bright = Math.floor(20 * hpRatio + 10);
+      ctx.fillStyle = `rgb(${bright},${bright},${Math.floor(bright * 1.8)})`;
+      ctx.strokeStyle = '#446';
+      ctx.shadowBlur = 4;
+      ctx.shadowColor = '#2244aa44';
     }
     ctx.lineWidth = 3;
     ctx.fillRect(s.x - this.w/2, s.y - this.h/2, this.w, this.h);
@@ -5422,13 +5565,6 @@ class Obstacle {
       ctx.font = 'bold 18px Bebas Neue';
       ctx.textAlign = 'center';
       ctx.fillText('☢', s.x, s.y + 6);
-    }
-
-    if (this.destructible && !this.explosive && this.hp < this.maxHp) {
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(s.x - this.w/2, s.y - this.h/2 - 6, this.w, 3);
-      ctx.fillStyle = '#ff5050';
-      ctx.fillRect(s.x - this.w/2, s.y - this.h/2 - 6, this.w * (this.hp / this.maxHp), 3);
     }
     ctx.restore();
   }
@@ -6285,6 +6421,12 @@ const ENTITY_IMAGES = {
   enemy_sniper:         { src: 'images/enemy_sniper.png',          size: 128, rotate: false, flip: false },
   enemy_sniper_run:     { src: 'images/enemy_sniper_run.png',      size: 128, rotate: false, flip: false },
   enemy_sniper_attack:  { src: 'images/enemy_sniper_attack.png',   size: 128, rotate: false, flip: false },
+  enemy_mortar:         { src: 'images/enemy_mortar.png',          size: 128, rotate: false, flip: false },
+  enemy_mortar_run:     { src: 'images/enemy_mortar_run.png',      size: 128, rotate: false, flip: false },
+  enemy_mortar_attack:  { src: 'images/enemy_mortar_attack.png',   size: 128, rotate: false, flip: false },
+
+  // 장애물 보물 컨테이너
+  obstacle_treasure:    { src: 'images/obstacle_treasure.png',     size: 90,  rotate: false, flip: false },
 
   // 일반 적 사망 잔상. 파일이 없으면 표시하지 않고 넘어갑니다.
   enemy_rusher_dead:    { src: 'images/enemy_rusher_dead.png',    size: 128, rotate: false, flip: false },
@@ -6292,6 +6434,7 @@ const ENTITY_IMAGES = {
   enemy_shielder_dead:  { src: 'images/enemy_shielder_dead.png',  size: 160, rotate: false, flip: false },
   enemy_assassin_dead:  { src: 'images/enemy_assassin_dead.png',  size: 128, rotate: false, flip: false },
   enemy_sniper_dead:    { src: 'images/enemy_sniper_dead.png',    size: 128, rotate: false, flip: false },
+  enemy_mortar_dead:    { src: 'images/enemy_mortar_dead.png',    size: 128, rotate: false, flip: false },
 
   // 보스 (5종) — 기본 + 상태별 이미지. 파일이 없으면 기본으로 폴백.
   boss_baekgyu:         { src: 'images/boss_baekgyu.png',         size: 128, rotate: false, flip: false },  // 백규
@@ -6803,14 +6946,16 @@ function spawnEnemyOffscreen() {
   if (STATE.phase >= 2) types.push('shielder');
   if (STATE.phase >= 3) types.push('assassin');
   if (STATE.phase >= 4) types.push('sniper');
-  
+  if (STATE.phase >= 5) types.push('mortar');
+
   // Probability weights
   const weights = {
     rusher: 4,
     shooter: 3,
     shielder: 1.5,
     assassin: 1.5,
-    sniper: 1
+    sniper: 1,
+    mortar: 1,
   };
   
   let total = 0;
@@ -6917,8 +7062,8 @@ function spawnLogic(dt) {
   
   nextSpawnIn -= dt;
   if (nextSpawnIn <= 0) {
-    // 동시 출현 캡: 페이즈가 올라갈수록 훨씬 많아짐
-    const cap = 12 + STATE.phase * 7;     // 8+phase*4 → 12+phase*7
+    // 동시 출현 캡: 최대 40마리
+    const cap = 40;
     if (enemies.length < cap) {
       spawnEnemyOffscreen();
       // 페이즈 ≥ 2: 추가로 1마리 더 (확률)
@@ -6950,7 +7095,8 @@ function spawnInitialObstacles() {
       // Not too close to player spawn
       if (Math.hypot(x - WORLD.w/2, y - WORLD.h/2) < 200) { tries++; continue; }
       const explosive = Math.random() < 0.15;
-      const ob = new Obstacle(x, y, explosive);
+      const treasure = !explosive && Math.random() < 0.01; // 1% 확률 보물 컨테이너
+      const ob = new Obstacle(x, y, explosive, treasure ? { treasure: true } : undefined);
       // Check overlap
       let ok = true;
       for (const o of obstacles) {
@@ -7004,59 +7150,123 @@ function circleHitsObstacleAt(ent, x, y) {
   return false;
 }
 
+// 우회 방향 선택 헬퍼: 플레이어에 더 가까워지는 CW(1) vs CCW(-1) 반환
+function _pickSteerSide(sx, sy, ndx, ndy, len, ent) {
+  const px = player ? player.x : sx;
+  const py = player ? player.y : sy;
+  // steerSide= 1 → +90° (screen CW): (-ndy, ndx)
+  const s1x = clamp(sx - ndy * len, ent.r, WORLD.w - ent.r);
+  const s1y = clamp(sy + ndx * len, ent.r, WORLD.h - ent.r);
+  // steerSide=-1 → -90° (screen CCW): (ndy, -ndx)
+  const s2x = clamp(sx + ndy * len, ent.r, WORLD.w - ent.r);
+  const s2y = clamp(sy - ndx * len, ent.r, WORLD.h - ent.r);
+  const s1Free = !circleHitsObstacleAt(ent, s1x, s1y);
+  const s2Free = !circleHitsObstacleAt(ent, s2x, s2y);
+  if (s1Free && !s2Free) return 1;
+  if (s2Free && !s1Free) return -1;
+  return (Math.hypot(s1x - px, s1y - py) < Math.hypot(s2x - px, s2y - py)) ? 1 : -1;
+}
+
 function moveEnemyAroundObstacles(ent, dx, dy) {
+  // ── 지속 상태 초기화 ──────────────────────────────────────────────
+  if (!ent._nav) {
+    ent._nav = {
+      steerSide: 0,    // 1=CW, -1=CCW, 0=미결정
+      steerTS:   0,    // 현재 우회 방향 시작 타임스탬프(ms)
+      ghostTS:   0,    // 유령 모드 종료 타임스탬프(ms)
+      checkTS:   0,    // 마지막 stuck 샘플 타임스탬프(ms)
+      checkX:    ent.x,
+      checkY:    ent.y,
+      stuckSec:  0,    // 누적 끼임 시간(초)
+    };
+  }
+  const nav = ent._nav;
+  const now = Date.now();
+
+  // ── 유령 모드: 3초 끼임 후 2초간 장애물 완전 통과 ─────────────
+  if (nav.ghostTS > now) {
+    ent.x = clamp(ent.x + dx, ent.r, WORLD.w - ent.r);
+    ent.y = clamp(ent.y + dy, ent.r, WORLD.h - ent.r);
+    return;
+  }
+
+  // ── Stuck 감지: 300 ms마다 위치 샘플링 ──────────────────────────
+  if (now - nav.checkTS >= 300) {
+    const interval = Math.min((now - nav.checkTS) / 1000, 0.6);
+    nav.checkTS = now;
+    const moved = Math.hypot(ent.x - nav.checkX, ent.y - nav.checkY);
+    nav.checkX = ent.x;
+    nav.checkY = ent.y;
+    // 기대 이동량의 12% 미만이면 끼인 것으로 판단
+    const threshold = Math.max(5, (ent.speed || 100) * interval * 0.12);
+    if (moved < threshold) {
+      nav.stuckSec += interval;
+    } else {
+      nav.stuckSec = Math.max(0, nav.stuckSec - interval * 0.5);
+    }
+    // 3초 이상 끼임 → 2초간 유령 모드 진입
+    if (nav.stuckSec >= 3.0) {
+      nav.ghostTS   = now + 2000;
+      nav.stuckSec  = 0;
+      nav.steerSide = 0;
+      if (typeof particles !== 'undefined') {
+        for (let i = 0; i < 6; i++) {
+          particles.push(new Particle(ent.x, ent.y, rand(-55, 55), rand(-75, -15), 0.55, '#66ccff', 3));
+        }
+      }
+      ent.x = clamp(ent.x + dx, ent.r, WORLD.w - ent.r);
+      ent.y = clamp(ent.y + dy, ent.r, WORLD.h - ent.r);
+      return;
+    }
+  }
+
   if (!dx && !dy) return;
-  const sx = ent.x;
-  const sy = ent.y;
+  const sx = ent.x, sy = ent.y;
+
+  // 이미 장애물 안에 있으면 그냥 밀어냄
   if (circleHitsObstacleAt(ent, sx, sy)) {
     ent.x = clamp(sx + dx, ent.r, WORLD.w - ent.r);
     ent.y = clamp(sy + dy, ent.r, WORLD.h - ent.r);
     return;
   }
-  let blockedX = false;
-  let blockedY = false;
-  
-  if (dx) {
-    const nx = clamp(sx + dx, ent.r, WORLD.w - ent.r);
-    if (!circleHitsObstacleAt(ent, nx, ent.y)) ent.x = nx;
-    else blockedX = true;
+
+  const len = Math.hypot(dx, dy);
+  if (!len) return;
+  const ndx = dx / len, ndy = dy / len;
+
+  // ── 직선 이동 시도 ───────────────────────────────────────────────
+  const nx = clamp(sx + dx, ent.r, WORLD.w - ent.r);
+  const ny = clamp(sy + dy, ent.r, WORLD.h - ent.r);
+  if (!circleHitsObstacleAt(ent, nx, ny)) {
+    ent.x = nx; ent.y = ny;
+    nav.steerSide = 0;
+    return;
   }
-  
-  if (dy) {
-    const ny = clamp(sy + dy, ent.r, WORLD.h - ent.r);
-    if (!circleHitsObstacleAt(ent, ent.x, ny)) ent.y = ny;
-    else blockedY = true;
+
+  // ── 장애물에 막힘 — 우회 방향 결정 ──────────────────────────────
+  if (nav.steerSide === 0) {
+    nav.steerSide = _pickSteerSide(sx, sy, ndx, ndy, len, ent);
+    nav.steerTS   = now;
+  } else if (now - nav.steerTS > 1400) {
+    // 1.4초 이상 같은 방향으로 못 뚫으면 반대 방향 시도
+    nav.steerSide = -nav.steerSide;
+    nav.steerTS   = now;
   }
-  
-  if (blockedX || blockedY) {
-    const len = Math.hypot(dx, dy);
-    if (len > 0) {
-      const step = Math.min(len, ent.speed ? ent.speed / 25 : len);
-      const options = [
-        { x: sx - dy / len * step, y: sy + dx / len * step },
-        { x: sx + dy / len * step, y: sy - dx / len * step },
-      ];
-      let best = null;
-      let bestScore = Infinity;
-      for (const opt of options) {
-        opt.x = clamp(opt.x, ent.r, WORLD.w - ent.r);
-        opt.y = clamp(opt.y, ent.r, WORLD.h - ent.r);
-        if (circleHitsObstacleAt(ent, opt.x, opt.y)) continue;
-        const score = player ? Math.hypot(opt.x - player.x, opt.y - player.y) : 0;
-        if (score < bestScore) {
-          bestScore = score;
-          best = opt;
-        }
-      }
-      if (best) {
-        ent.x = best.x;
-        ent.y = best.y;
-      }
+
+  // ── 15° 간격으로 최대 180° 회전 탐색 ────────────────────────────
+  for (let deg = 15; deg <= 180; deg += 15) {
+    const rad = (deg * Math.PI / 180) * nav.steerSide;
+    const c = Math.cos(rad), s = Math.sin(rad);
+    const rdx = (ndx * c - ndy * s) * len;
+    const rdy = (ndx * s + ndy * c) * len;
+    const tx = clamp(sx + rdx, ent.r, WORLD.w - ent.r);
+    const ty = clamp(sy + rdy, ent.r, WORLD.h - ent.r);
+    if (!circleHitsObstacleAt(ent, tx, ty)) {
+      ent.x = tx; ent.y = ty;
+      return;
     }
   }
-  
-  ent.x = clamp(ent.x, ent.r, WORLD.w - ent.r);
-  ent.y = clamp(ent.y, ent.r, WORLD.h - ent.r);
+  // 사방이 완전히 막힌 경우 — 제자리 대기 (stuckSec이 쌓여 유령 모드 트리거)
 }
 
 // =============================================================
@@ -7070,6 +7280,10 @@ function _getEnemyImgKey(en) {
     if (en.dodgeSlideTime > 0)                             return 'enemy_assassin_slide';
     if (en.meleeTelegraph > 0 || en.attackAnim > 0)        return 'enemy_assassin_attack';
     return 'enemy_assassin_run';
+  }
+  if (t === 'mortar') {
+    if (en.aiming > 0 || en.attackAnim > 0) return 'enemy_mortar_attack';
+    return 'enemy_mortar_run';
   }
   const isAttacking = en.meleeTelegraph > 0 || en.attackAnim > 0;
   return isAttacking ? `enemy_${t}_attack` : `enemy_${t}_run`;
